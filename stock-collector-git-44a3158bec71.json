@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "stock-collector-git",
+  "private_key_id": "44a3158bec714210de20ce4a23cb17ebe8ebae8e",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC+5Ov0zNB6IPZX\ndVeJLNq/Yc0qeZiDtr9KeO1CIGmdseDU64PADdJQZsxRltzomJ5pKNgyalBNvexb\nXC+tyF6qlQ2VGwBK8MOtBU5QRkQdHwV4KS2dGK2LhqI8QLjjNAmD5JOBMtZ76CLY\nvJsFo8ga2dAMOjmL21ztdgdEIe0AA9RxdMW6fOYyVn/XDAZy0Q8vJkN8atiwfTRY\nIHZcmX9mlTglcx2h5Wlot/S1lh/Fd5arwowvw+Z6SrMFrOtZPxrRaSvACuiXgtwZ\nM19mL4Me6AjIv/VKYJvphf7WoR2CKQ+7APPAiitAiKhtFcB9Vc8UEilr2JmjMPPr\nXzfIRkn3AgMBAAECggEAHVVC9sJ0NJgVEnpbAZ6tXGQ0aRb3OyIdQd3UI2mkoRFA\nyacI/z2AeE9bjRwABRPSn7khg5m3jkKla6J+Rxd3iIHP7P4RrPJTNyaOEqLBe7IV\nHpJBSpcMr9h33Idbgbowzh4VFnDP6YlRtXlB3vt8V7fpkr9tsVJ7dJfC5RLLfslT\n6nJwcdgI7EBKj3Sa4nOJyLQrl17LF6TGJ9VpuHN0Q3yGR/c2RcZtxB1NopREeXqz\nUHX7ERawhxZKx1WFHmUdZfevlrpr4OqtC/sRwF74/6ot/DtrbIfnigU0mdIYeCe1\nf8HPxtMqrDSKEREQR/DCMlAhDgXxPkdXTKk+dj01tQKBgQDiIpmTw23ekM4tY6Ow\njOfjGTdRgTxFmnotgkxdC/HvUgRnXQZLZ4ASc5asa7/g1vZuRd7IkzqJfhZZJjpm\nfb6zL0VcojcWLtDpELAolkT3Zl024nzGQtUBLWnDJSmXN3vR6LYBXPPcbo5WXm41\nj0Za+GknXAipLhFJCar4CJuVlQKBgQDYGtyYmCNVkFe1qW9rVs52MZ4mhmBZcipi\nF9gz9aGIWpr24E7elTtecV9QwaxGVeYsKzyIZFmh+5yXp6Qg+ziFJRFGny5KsQdQ\nMknlpScZ9Zk0SvgjOQf/z0v4Z1w9nrnb5sYl1lNF+h/isuUT297r+lnGW3BtN5Pt\nbucZpLQmWwKBgQCD9fTxCYY/7vih/Bc1m8Rl/f0ODwCBDZhmnja5xZK1OYNgXiSi\nNA/EtLckfuxF5KuBxjwvh9sNCQs5ktlZnd9+6QLs/6xtwXwfxaFGzgoI5S9YK+rs\nN2vdeAbT3gfbOoGDCO3M9dVIuStOs2RU1PsVcwjJ8ycKsttbZ8zhWQSR0QKBgBXw\nHCbNgwDDp3PEoI/3/vuWq+RjTdKmuVC99O/JZr2N3R9kw/zqj11WCwQKtS9qtvQS\n65E5BrRf85SdqxbCCgnSKn/N1wg0Enb8s+3BJ0gGW6goWCpTNtGsPJ0Z+Q40V8/Q\nDJt4t3lqG+SKnqC2eFniT0zIqZAczUKUOJes1bDzAoGAPxd1iOE0FbPpCurL+RXB\nbd6R164DgqZoiwPebyng4UTU4ZtRiW8AlJzWcJ3KGqCcXSB56IaDtcOYiwKddhIx\nsqoTkuMk0yGAfWkZZXMBEgLr1xCByAh17uDYsBlpO3hmoCDKwOUDZ7Zx+PptxVHe\n7jmGQD0vtLmgdPp6KDRDHgw=\n-----END PRIVATE KEY-----\n",
+  "client_email": "stock-bot@stock-collector-git.iam.gserviceaccount.com",
+  "client_id": "104761575451418751465",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/stock-bot%40stock-collector-git.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
