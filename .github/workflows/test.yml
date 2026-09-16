@@ -1,0 +1,25 @@
+name: My First Test Bot
+
+# 언제 실행할 것인가? (workflow_dispatch는 '수동 버튼 클릭'을 의미함)
+on:
+  workflow_dispatch:
+
+# 어떤 작업을 할 것인가?
+jobs:
+  run-python-code:
+    runs-on: ubuntu-latest # 깃허브의 리눅스 컴퓨터를 한 대 빌려와라
+
+    steps:
+      # 1. 내 저장소에 있는 코드(main.py)를 빌려온 컴퓨터로 복사해 와라
+      - name: 코드 가져오기
+        uses: actions/checkout@v3
+
+      # 2. 그 컴퓨터에 파이썬을 설치해라
+      - name: 파이썬 설치하기
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      # 3. 내 코드를 실행해라
+      - name: 파이썬 스크립트 실행
+        run: python main.py
