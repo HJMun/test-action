@@ -18,7 +18,10 @@ def send_telegram_message(message):
     """텔레그램 봇으로 알림 메시지를 전송하는 함수"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-    requests.post(url, json=payload)
+    
+    # 🚨 여기에 에러 추적기를 달았습니다!
+    response = requests.post(url, json=payload)
+    print(f"텔레그램 전송 결과: {response.text}")
 
 # ==========================================
 # 2. 데이터 수집 로직 (한국투자증권 API - 초당 제한 고려)
