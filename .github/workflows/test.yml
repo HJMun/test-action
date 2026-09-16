@@ -1,25 +1,41 @@
-name: My First Test Bot
+name: Daily Market Data Collector
 
-# 언제 실행할 것인가? (workflow_dispatch는 '수동 버튼 클릭'을 의미함)
 on:
+  schedule:
+    # 한국 15:40 = UTC 06:40 / 한국 20:15 = UTC 11:15 (월~금)
+    - cron: '40 6 * * 1-5'
+    - cron: '15 11 * * 1-5'
   workflow_dispatch:
 
-# 어떤 작업을 할 것인가?
 jobs:
-  run-python-code:
-    runs-on: ubuntu-latest # 깃허브의 리눅스 컴퓨터를 한 대 빌려와라
+  collect-data:
+    runs-on: ubuntu-latest
 
     steps:
-      # 1. 내 저장소에 있는 코드(main.py)를 빌려온 컴퓨터로 복사해 와라
-      - name: 코드 가져오기
+      - name: Checkout Repository
         uses: actions/checkout@v3
 
-      # 2. 그 컴퓨터에 파이썬을 설치해라
-      - name: 파이썬 설치하기
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      # 3. 내 코드를 실행해라
-      - name: 파이썬 스크립트 실행
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Collector
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GSHEET_URL: ${{ secrets.GSHEET_URL }}
+          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
         run: python main.py
+
+      - name: Commit and Push CSV Archive
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add market_data_archive.csv
+          git commit -m "Auto-update market data archive" || echo "No changes to commit"
+          git push
