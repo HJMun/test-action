@@ -21,7 +21,10 @@ GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID")
 
 APP_KEY = os.environ.get("APP_KEY")
 APP_SECRET = os.environ.get("APP_SECRET")
-KIS_BASE_URL = "https://openapivts.koreainvestment.com:9443"
+
+# 실전투자 서버 URL로 변경 완료
+# (모의투자용 키를 사용하시는 경우 https://openapivts.koreainvestment.com:29443 로 변경)
+KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
 
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
@@ -57,16 +60,13 @@ def get_kis_access_token():
 # ==========================================
 def get_all_target_symbols():
     print("시장 전체 상장 종목 및 ETF 목록을 불러옵니다...")
-    # KRX 전체 주식 (코스피, 코스닥)
     krx_df = fdr.StockListing('KRX')
     krx_df = krx_df[['Code', 'Name', 'Market']].rename(columns={'Code': '종목코드', 'Name': '종목명', 'Market': '업종'})
     
-    # ETF 목록 
     etf_df = fdr.StockListing('ETF/KR')
     etf_df = etf_df[['Symbol', 'Name']].rename(columns={'Symbol': '종목코드', 'Name': '종목명'})
     etf_df['업종'] = 'ETF'
 
-    # 두 목록 병합 후 중복 제거
     final_symbols_df = pd.concat([krx_df, etf_df], ignore_index=True)
     final_symbols_df.drop_duplicates(subset=['종목코드'], inplace=True)
     
@@ -91,10 +91,9 @@ def fetch_market_data():
         "authorization": f"Bearer {access_token}",
         "appkey": APP_KEY,
         "appsecret": APP_SECRET,
-        "tr_id": "FHKST01010100" # 주식현재가 시세 API 엔드포인트
+        "tr_id": "FHKST01010100" 
     }
 
-    # 전체 종목을 순회하며 데이터 수집
     for item in symbols_list:
         code = item['종목코드']
         params = {
@@ -110,7 +109,6 @@ def fetch_market_data():
             if data.get('rt_cd') == '0':
                 output = data.get('output', {})
                 
-                # ETF는 재무지표가 없으므로 예외 처리 (0 또는 빈값 처리)
                 is_etf = item['업종'] == 'ETF'
                 
                 row = {
@@ -119,18 +117,16 @@ def fetch_market_data():
                     "종목명": item['종목명'],
                     "업종": item['업종'],
                     "종가": int(output.get('stck_prpr', 0)),
-                    # 당일 투자자별 순매수 API는 별도 호출이 필요하므로 현재는 임시값 0 처리 (추후 고도화 시 병합)
                     "외국인순매수": 0, 
                     "기관순매수": 0,
                     "PER": float(output.get('per', 0)) if not is_etf and output.get('per') else 0.0,
                     "PBR": float(output.get('pbr', 0)) if not is_etf and output.get('pbr') else 0.0,
-                    "ROE": 0.0, # 기본 API에서 제공 안됨 (별도 재무 API 필요)
+                    "ROE": 0.0, 
                     "부채비율": 0.0, 
                     "유보율": 0.0
                 }
                 market_data.append(row)
                 
-            # 한투증권 초당 요청 제한(초당 20건) 우회를 위한 딜레이
             time.sleep(0.06)
             
         except Exception as e:
