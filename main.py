@@ -6,6 +6,9 @@ import pandas as pd
 from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+import FinanceDataReader as fdr
 
 # ==========================================
 # 1. 환경 변수 및 시크릿 키 로드 (GitHub Secrets)
@@ -14,25 +17,26 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GSHEET_URL = os.environ.get("GSHEET_URL")
 GCP_JSON = os.environ.get("GCP_SERVICE_ACCOUNT_JSON")
+GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID")
 
-# 한국투자증권 API 열쇠 로드
 APP_KEY = os.environ.get("APP_KEY")
 APP_SECRET = os.environ.get("APP_SECRET")
-
-# 실전투자 / 모의투자 서버 URL 설정 (모의투자인 경우 도메인 변경 필요)
-# 모의투자: https://openapivts.koreainvestment.com:9443
-# 실전투자: https://openapi.koreainvestment.com:9443
 KIS_BASE_URL = "https://openapivts.koreainvestment.com:9443"
 
+SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive'
+]
+
 def send_telegram_message(message):
-    """텔레그램 봇으로 알림 메시지를 전송하는 함수"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-    response = requests.post(url, json=payload)
-    print(f"텔레그램 전송 결과: {response.text}")
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"텔레그램 알림 실패: {e}")
 
 def get_kis_access_token():
-    """한국투자증권 API Access Token 발급 함수"""
     path = "/oauth2/tokenP"
     url = f"{KIS_BASE_URL}{path}"
     headers = {"content-type": "application/json"}
@@ -41,64 +45,132 @@ def get_kis_access_token():
         "appkey": APP_KEY,
         "appsecret": APP_SECRET
     }
-    
     try:
         res = requests.post(url, headers=headers, data=json.dumps(body))
-        res_data = res.json()
-        access_token = res_data.get("access_token")
-        return access_token
+        return res.json().get("access_token")
     except Exception as e:
-        print(f"한투 토큰 발급 에러: {e}")
+        print(f"토큰 발급 에러: {e}")
         return None
 
 # ==========================================
-# 2. 데이터 수집 로직 (한투 API 연동 + 재무 지표 포함)
+# 2. 전체 종목 리스트 수집 (코스피, 코스닥, ETF)
+# ==========================================
+def get_all_target_symbols():
+    print("시장 전체 상장 종목 및 ETF 목록을 불러옵니다...")
+    # KRX 전체 주식 (코스피, 코스닥)
+    krx_df = fdr.StockListing('KRX')
+    krx_df = krx_df[['Code', 'Name', 'Market']].rename(columns={'Code': '종목코드', 'Name': '종목명', 'Market': '업종'})
+    
+    # ETF 목록 
+    etf_df = fdr.StockListing('ETF/KR')
+    etf_df = etf_df[['Symbol', 'Name']].rename(columns={'Symbol': '종목코드', 'Name': '종목명'})
+    etf_df['업종'] = 'ETF'
+
+    # 두 목록 병합 후 중복 제거
+    final_symbols_df = pd.concat([krx_df, etf_df], ignore_index=True)
+    final_symbols_df.drop_duplicates(subset=['종목코드'], inplace=True)
+    
+    return final_symbols_df.to_dict('records')
+
+# ==========================================
+# 3. 데이터 수집 로직 (한투 API 연동)
 # ==========================================
 def fetch_market_data():
-    """한국투자증권 API를 통해 확장된 재무/시세 데이터를 수집하는 함수"""
     today_str = datetime.now().strftime("%Y-%m-%d")
-    print(f"[{today_str}] 한국투자증권 API 연동 데이터 수집 시작...")
+    print(f"[{today_str}] 한국투자증권 API 전체 종목 데이터 수집 시작...")
     
-    # 1단계: API 접근을 위한 토큰 발급
     access_token = get_kis_access_token()
     if not access_token:
-        print("⚠️ 한투 API 토큰 발급 실패. 임시 구조 데이터로 대체합니다.")
+        raise Exception("한투 API 토큰 발급에 실패하여 수집을 중단합니다.")
     
-    # 2단계: 실제 API 연동 부 (추후 종목 루프를 돌며 시세 및 재무 지표 수집)
-    # 아래는 우리가 확정한 최종 컬럼 구조에 맞춘 샘플 데이터 구조입니다.
-    # (실제 API 호출 시 get_price / get_financial_info 등을 조합하여 채워넣게 됩니다)
-    market_data = [
-        {
-            "날짜": today_str, "종목코드": "005930", "종목명": "삼성전자", "업종": "전기전자", 
-            "종가": 70000, "외국인순매수": 150000, "기관순매수": -50000,
-            "PER": 14.5, "PBR": 1.3, "ROE": 9.8, "부채비율": 27.2, "유보율": 2500.0
-        },
-        {
-            "날짜": today_str, "종목코드": "000660", "종목명": "SK하이닉스", "업종": "전기전자", 
-            "종가": 150000, "외국인순매수": 20000, "기관순매수": 10000,
-            "PER": 10.2, "PBR": 1.7, "ROE": 15.4, "부채비율": 65.4, "유보율": 850.0
-        },
-    ]
+    symbols_list = get_all_target_symbols()
+    market_data = []
     
+    headers = {
+        "content-type": "application/json",
+        "authorization": f"Bearer {access_token}",
+        "appkey": APP_KEY,
+        "appsecret": APP_SECRET,
+        "tr_id": "FHKST01010100" # 주식현재가 시세 API 엔드포인트
+    }
+
+    # 전체 종목을 순회하며 데이터 수집
+    for item in symbols_list:
+        code = item['종목코드']
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": code
+        }
+        
+        try:
+            url = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
+            res = requests.get(url, headers=headers, params=params)
+            data = res.json()
+            
+            if data.get('rt_cd') == '0':
+                output = data.get('output', {})
+                
+                # ETF는 재무지표가 없으므로 예외 처리 (0 또는 빈값 처리)
+                is_etf = item['업종'] == 'ETF'
+                
+                row = {
+                    "날짜": today_str,
+                    "종목코드": code,
+                    "종목명": item['종목명'],
+                    "업종": item['업종'],
+                    "종가": int(output.get('stck_prpr', 0)),
+                    # 당일 투자자별 순매수 API는 별도 호출이 필요하므로 현재는 임시값 0 처리 (추후 고도화 시 병합)
+                    "외국인순매수": 0, 
+                    "기관순매수": 0,
+                    "PER": float(output.get('per', 0)) if not is_etf and output.get('per') else 0.0,
+                    "PBR": float(output.get('pbr', 0)) if not is_etf and output.get('pbr') else 0.0,
+                    "ROE": 0.0, # 기본 API에서 제공 안됨 (별도 재무 API 필요)
+                    "부채비율": 0.0, 
+                    "유보율": 0.0
+                }
+                market_data.append(row)
+                
+            # 한투증권 초당 요청 제한(초당 20건) 우회를 위한 딜레이
+            time.sleep(0.06)
+            
+        except Exception as e:
+            print(f"{code} ({item['종목명']}) 수집 에러: {e}")
+            continue
+
     df = pd.DataFrame(market_data)
     return df
 
 # ==========================================
-# 3. 투트랙 하이브리드 저장 (Google Sheets + CSV)
+# 4. 투트랙 저장 (CSV in Drive + Google Sheets)
 # ==========================================
 def save_to_hybrid_storage(new_df):
     today_str = datetime.now().strftime("%Y-%m-%d")
-    
-    # 3-1. CSV 아카이브 업데이트 (전체 데이터 누적)
     csv_filename = "market_data_archive.csv"
+    
     if os.path.exists(csv_filename):
-        new_df.to_csv(csv_filename, mode='a', header=False, index=False, encoding='utf-8-sig')
+        archive_df = pd.read_csv(csv_filename)
+        archive_df = pd.concat([archive_df, new_df], ignore_index=True)
+        archive_df.drop_duplicates(subset=['날짜', '종목코드'], keep='last', inplace=True)
+        archive_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
     else:
         new_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
     
-    # 3-2. Google Sheets 업데이트 (최근 1달치 롤링 유지)
     try:
-        credentials = Credentials.from_service_account_info(eval(GCP_JSON), scopes=['https://www.googleapis.com/auth/spreadsheets'])
+        credentials = Credentials.from_service_account_info(eval(GCP_JSON), scopes=SCOPES)
+        drive_service = build('drive', 'v3', credentials=credentials)
+        
+        query_csv = f"name='{csv_filename}' and '{GDRIVE_FOLDER_ID}' in parents and trashed=false"
+        csv_results = drive_service.files().list(q=query_csv, spaces='drive').execute()
+        csv_items = csv_results.get('files', [])
+        
+        media = MediaFileUpload(csv_filename, mimetype='text/csv', resumable=True)
+        if not csv_items:
+            file_metadata = {'name': csv_filename, 'parents': [GDRIVE_FOLDER_ID]}
+            drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+        else:
+            file_id = csv_items[0].get('id')
+            drive_service.files().update(fileId=file_id, media_body=media).execute()
+
         gc = gspread.authorize(credentials)
         sheet = gc.open_by_url(GSHEET_URL).worksheet("RawData")
         
@@ -110,32 +182,32 @@ def save_to_hybrid_storage(new_df):
             cutoff_date = pd.to_datetime(today_str) - timedelta(days=30)
             recent_df = existing_df[existing_df['날짜'] >= cutoff_date].copy()
             recent_df['날짜'] = recent_df['날짜'].dt.strftime("%Y-%m-%d")
+            
             final_df = pd.concat([recent_df, new_df], ignore_index=True)
+            final_df.drop_duplicates(subset=['날짜', '종목코드'], keep='last', inplace=True)
         else:
             final_df = new_df
             
         sheet.clear()
         sheet.update([final_df.columns.values.tolist()] + final_df.values.tolist())
-        print("구글 시트 업데이트 완료!")
         
     except Exception as e:
-        print(f"구글 시트 업데이트 건너뜀: {e}")
+        print(f"구글 저장 실패: {e}")
+        raise e
 
 # ==========================================
-# 4. 메인 실행 블록
+# 5. 메인 실행 블록
 # ==========================================
 if __name__ == "__main__":
     try:
         daily_df = fetch_market_data()
         save_to_hybrid_storage(daily_df)
         
-        success_msg = f"✅ [데이터 수집 완료]\n- 날짜: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n- 수집 종목 수: {len(daily_df)}개\n- 추가 지표: PER, PBR, ROE, 부채비율, 유보율 반영 완료"
+        success_msg = f"✅ [전체 데이터 수집 완료]\n날짜: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n수집 종목 수: {len(daily_df):,}개\n구글 드라이브 업데이트 성공"
         send_telegram_message(success_msg)
         print("작업이 성공적으로 완료되었습니다.")
         
     except Exception as e:
-        error_msg = f"🚨 [데이터 수집 에러]\n- 내용: {str(e)}"
-        try:
-            send_telegram_message(error_msg)
-        except:
-            print("텔레그램 전송 실패:", error_msg)
+        error_msg = f"🚨 [데이터 수집 에러]\n내용: {str(e)}"
+        send_telegram_message(error_msg)
+        print(error_msg)
