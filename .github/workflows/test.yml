@@ -24,7 +24,7 @@ jobs:
         run: |
           pip install -r requirements.txt google-api-python-client finance-datareader
 
-      - name: Run Collector
+      - name: Run Collector and Screener
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -33,7 +33,9 @@ jobs:
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
           APP_KEY: ${{ secrets.APP_KEY }}
           APP_SECRET: ${{ secrets.APP_SECRET }}
-        run: python main.py
+        run: |
+          python main.py
+          python screener.py
 
       - name: Commit and Push CSV Archive
         run: |
