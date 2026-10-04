@@ -11,7 +11,7 @@ from googleapiclient.http import MediaFileUpload
 import FinanceDataReader as fdr
 
 # ==========================================
-# 1. 환경 변수 및 시크릿 키 로드 (GitHub Secrets)
+# 1. 환경 변수 및 시크릿 키 로드
 # ==========================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -21,7 +21,7 @@ GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID")
 
 APP_KEY = os.environ.get("APP_KEY")
 APP_SECRET = os.environ.get("APP_SECRET")
-KIS_BASE_URL = "https://openapi.koreainvestment.com:9443" # 실전투자 URL
+KIS_BASE_URL = "https://openapi.koreainvestment.com:9443" 
 
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
@@ -52,9 +52,6 @@ def get_kis_access_token():
         print(f"토큰 발급 에러: {e}")
         return None
 
-# ==========================================
-# 2. 전체 종목 리스트 수집 (코스피, 코스닥, ETF)
-# ==========================================
 def get_all_target_symbols():
     print("시장 전체 상장 종목 및 ETF 목록을 불러옵니다...")
     krx_df = fdr.StockListing('KRX')
@@ -66,15 +63,14 @@ def get_all_target_symbols():
 
     final_symbols_df = pd.concat([krx_df, etf_df], ignore_index=True)
     final_symbols_df.drop_duplicates(subset=['종목코드'], inplace=True)
-    
     return final_symbols_df.to_dict('records')
 
 # ==========================================
-# 3. 데이터 수집 로직 (한투 API 시세 + 재무 투트랙 연동)
+# 3. 데이터 수집 로직 (시세 + 재무 + 수급 3-Track)
 # ==========================================
 def fetch_market_data():
     today_str = datetime.now().strftime("%Y-%m-%d")
-    print(f"[{today_str}] 한국투자증권 API 전체 종목 데이터 수집 시작...")
+    print(f"[{today_str}] API 전체 종목 데이터 수집 시작 (시세/재무/수급)...")
     
     access_token = get_kis_access_token()
     if not access_token:
@@ -93,58 +89,63 @@ def fetch_market_data():
     for item in symbols_list:
         code = item['종목코드']
         is_etf = item['업종'] == 'ETF'
-        
-        params = {
-            "FID_COND_MRKT_DIV_CODE": "J",
-            "FID_INPUT_ISCD": code
-        }
+        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
         
         try:
-            # [API 1차 호출] 주식 현재가 및 기본 지표 (PER, PBR)
+            # [API 1] 시세 및 기본 지표
             url_price = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
             headers_price = headers.copy()
             headers_price["tr_id"] = "FHKST01010100"
-            
             res_price = requests.get(url_price, headers=headers_price, params=params)
             data_price = res_price.json()
-            time.sleep(0.06) # API 차단 방지용 기본 딜레이
+            time.sleep(0.06) 
             
-            # 재무 지표 기본값 세팅
+            # [API 2] 기업 재무비율 (ETF 제외)
             roe_val, lblt_rate, rsrv_rate = 0.0, 0.0, 0.0
-            
-            # [API 2차 호출] 기업 재무비율 (ROE, 부채비율, 유보율) - ETF는 건너뜀
             if not is_etf:
                 url_fin = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/finance/financial-ratio"
                 headers_fin = headers.copy()
                 headers_fin["tr_id"] = "FHKST1060000C" 
-                
                 res_fin = requests.get(url_fin, headers=headers_fin, params=params)
                 data_fin = res_fin.json()
-                
                 if data_fin.get('rt_cd') == '0':
                     output_fin = data_fin.get('output', {})
-                    # KIS API 응답 키값 파싱 (비어있거나 에러일 경우 0.0 처리)
                     try: roe_val = float(output_fin.get('roe_val', 0.0))
                     except: pass
                     try: lblt_rate = float(output_fin.get('lblt_rate', 0.0))
                     except: pass
                     try: rsrv_rate = float(output_fin.get('rsrv_rate', 0.0))
                     except: pass
-                    
-                time.sleep(0.06) # 재무 데이터 조회 후 추가 딜레이
+                time.sleep(0.06)
+                
+            # [API 3] 당일 외국인/기관 수급 동향 (순매수 수량)
+            frgn_net, orgn_net = 0, 0
+            url_inv = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor"
+            headers_inv = headers.copy()
+            headers_inv["tr_id"] = "FHKST01010900"
+            res_inv = requests.get(url_inv, headers=headers_inv, params=params)
+            data_inv = res_inv.json()
+            if data_inv.get('rt_cd') == '0':
+                output_inv = data_inv.get('output', [])
+                if len(output_inv) > 0:
+                    today_inv = output_inv[0]
+                    try: frgn_net = int(today_inv.get('frgn_ntby_qty', 0))
+                    except: pass
+                    try: orgn_net = int(today_inv.get('orgn_ntby_qty', 0))
+                    except: pass
+            time.sleep(0.06)
             
-            # 수집된 데이터를 하나의 행(Row)으로 병합
+            # 행 병합
             if data_price.get('rt_cd') == '0':
                 output_price = data_price.get('output', {})
-                
                 row = {
                     "날짜": today_str,
                     "종목코드": code,
                     "종목명": item['종목명'],
                     "업종": item['업종'],
                     "종가": int(output_price.get('stck_prpr', 0)),
-                    "외국인순매수": 0, 
-                    "기관순매수": 0,
+                    "외국인순매수": frgn_net, 
+                    "기관순매수": orgn_net,
                     "PER": float(output_price.get('per', 0)) if not is_etf and output_price.get('per') else 0.0,
                     "PBR": float(output_price.get('pbr', 0)) if not is_etf and output_price.get('pbr') else 0.0,
                     "ROE": roe_val, 
@@ -154,15 +155,12 @@ def fetch_market_data():
                 market_data.append(row)
                 
         except Exception as e:
-            print(f"{code} ({item['종목명']}) 수집 에러: {e}")
+            print(f"{code} 수집 에러: {e}")
             continue
 
     df = pd.DataFrame(market_data)
     return df
 
-# ==========================================
-# 4. 투트랙 저장 (CSV in Drive + Google Sheets)
-# ==========================================
 def save_to_hybrid_storage(new_df):
     today_str = datetime.now().strftime("%Y-%m-%d")
     csv_filename = "market_data_archive.csv"
@@ -174,7 +172,6 @@ def save_to_hybrid_storage(new_df):
             archive_df.drop_duplicates(subset=['날짜', '종목코드'], keep='last', inplace=True)
             archive_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
         except pd.errors.EmptyDataError:
-            # 사용자가 빈 깡통 파일을 올렸을 경우 발생하는 에러를 예외 처리하여 새 데이터로 덮어씀
             new_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
     else:
         new_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
@@ -206,7 +203,6 @@ def save_to_hybrid_storage(new_df):
             cutoff_date = pd.to_datetime(today_str) - timedelta(days=30)
             recent_df = existing_df[existing_df['날짜'] >= cutoff_date].copy()
             recent_df['날짜'] = recent_df['날짜'].dt.strftime("%Y-%m-%d")
-            
             final_df = pd.concat([recent_df, new_df], ignore_index=True)
             final_df.drop_duplicates(subset=['날짜', '종목코드'], keep='last', inplace=True)
         else:
@@ -219,19 +215,13 @@ def save_to_hybrid_storage(new_df):
         print(f"구글 저장 실패: {e}")
         raise e
 
-# ==========================================
-# 5. 메인 실행 블록
-# ==========================================
 if __name__ == "__main__":
     try:
         daily_df = fetch_market_data()
         save_to_hybrid_storage(daily_df)
         
-        success_msg = f"✅ [전체 데이터 수집 완료]\n날짜: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n수집 종목 수: {len(daily_df):,}개\n구글 드라이브 업데이트 성공"
+        success_msg = f"✅ [데이터 수집 완료]\n날짜: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n수집 종목 수: {len(daily_df):,}개\n구글 드라이브 업데이트 성공"
         send_telegram_message(success_msg)
-        print("작업이 성공적으로 완료되었습니다.")
-        
     except Exception as e:
         error_msg = f"🚨 [데이터 수집 에러]\n내용: {str(e)}"
         send_telegram_message(error_msg)
-        print(error_msg)
