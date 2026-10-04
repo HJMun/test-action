@@ -21,10 +21,7 @@ GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID")
 
 APP_KEY = os.environ.get("APP_KEY")
 APP_SECRET = os.environ.get("APP_SECRET")
-
-# 실전투자 서버 URL로 변경 완료
-# (모의투자용 키를 사용하시는 경우 https://openapivts.koreainvestment.com:29443 로 변경)
-KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
+KIS_BASE_URL = "https://openapi.koreainvestment.com:9443" # 실전투자 URL
 
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
@@ -73,7 +70,7 @@ def get_all_target_symbols():
     return final_symbols_df.to_dict('records')
 
 # ==========================================
-# 3. 데이터 수집 로직 (한투 API 연동)
+# 3. 데이터 수집 로직 (한투 API 시세 + 재무 투트랙 연동)
 # ==========================================
 def fetch_market_data():
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -90,45 +87,72 @@ def fetch_market_data():
         "content-type": "application/json",
         "authorization": f"Bearer {access_token}",
         "appkey": APP_KEY,
-        "appsecret": APP_SECRET,
-        "tr_id": "FHKST01010100" 
+        "appsecret": APP_SECRET
     }
 
     for item in symbols_list:
         code = item['종목코드']
+        is_etf = item['업종'] == 'ETF'
+        
         params = {
             "FID_COND_MRKT_DIV_CODE": "J",
             "FID_INPUT_ISCD": code
         }
         
         try:
-            url = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
-            res = requests.get(url, headers=headers, params=params)
-            data = res.json()
+            # [API 1차 호출] 주식 현재가 및 기본 지표 (PER, PBR)
+            url_price = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
+            headers_price = headers.copy()
+            headers_price["tr_id"] = "FHKST01010100"
             
-            if data.get('rt_cd') == '0':
-                output = data.get('output', {})
+            res_price = requests.get(url_price, headers=headers_price, params=params)
+            data_price = res_price.json()
+            time.sleep(0.06) # API 차단 방지용 기본 딜레이
+            
+            # 재무 지표 기본값 세팅
+            roe_val, lblt_rate, rsrv_rate = 0.0, 0.0, 0.0
+            
+            # [API 2차 호출] 기업 재무비율 (ROE, 부채비율, 유보율) - ETF는 건너뜀
+            if not is_etf:
+                url_fin = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/finance/financial-ratio"
+                headers_fin = headers.copy()
+                headers_fin["tr_id"] = "FHKST1060000C" 
                 
-                is_etf = item['업종'] == 'ETF'
+                res_fin = requests.get(url_fin, headers=headers_fin, params=params)
+                data_fin = res_fin.json()
+                
+                if data_fin.get('rt_cd') == '0':
+                    output_fin = data_fin.get('output', {})
+                    # KIS API 응답 키값 파싱 (비어있거나 에러일 경우 0.0 처리)
+                    try: roe_val = float(output_fin.get('roe_val', 0.0))
+                    except: pass
+                    try: lblt_rate = float(output_fin.get('lblt_rate', 0.0))
+                    except: pass
+                    try: rsrv_rate = float(output_fin.get('rsrv_rate', 0.0))
+                    except: pass
+                    
+                time.sleep(0.06) # 재무 데이터 조회 후 추가 딜레이
+            
+            # 수집된 데이터를 하나의 행(Row)으로 병합
+            if data_price.get('rt_cd') == '0':
+                output_price = data_price.get('output', {})
                 
                 row = {
                     "날짜": today_str,
                     "종목코드": code,
                     "종목명": item['종목명'],
                     "업종": item['업종'],
-                    "종가": int(output.get('stck_prpr', 0)),
+                    "종가": int(output_price.get('stck_prpr', 0)),
                     "외국인순매수": 0, 
                     "기관순매수": 0,
-                    "PER": float(output.get('per', 0)) if not is_etf and output.get('per') else 0.0,
-                    "PBR": float(output.get('pbr', 0)) if not is_etf and output.get('pbr') else 0.0,
-                    "ROE": 0.0, 
-                    "부채비율": 0.0, 
-                    "유보율": 0.0
+                    "PER": float(output_price.get('per', 0)) if not is_etf and output_price.get('per') else 0.0,
+                    "PBR": float(output_price.get('pbr', 0)) if not is_etf and output_price.get('pbr') else 0.0,
+                    "ROE": roe_val, 
+                    "부채비율": lblt_rate, 
+                    "유보율": rsrv_rate
                 }
                 market_data.append(row)
                 
-            time.sleep(0.06)
-            
         except Exception as e:
             print(f"{code} ({item['종목명']}) 수집 에러: {e}")
             continue
@@ -144,10 +168,14 @@ def save_to_hybrid_storage(new_df):
     csv_filename = "market_data_archive.csv"
     
     if os.path.exists(csv_filename):
-        archive_df = pd.read_csv(csv_filename)
-        archive_df = pd.concat([archive_df, new_df], ignore_index=True)
-        archive_df.drop_duplicates(subset=['날짜', '종목코드'], keep='last', inplace=True)
-        archive_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
+        try:
+            archive_df = pd.read_csv(csv_filename)
+            archive_df = pd.concat([archive_df, new_df], ignore_index=True)
+            archive_df.drop_duplicates(subset=['날짜', '종목코드'], keep='last', inplace=True)
+            archive_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
+        except pd.errors.EmptyDataError:
+            # 사용자가 빈 깡통 파일을 올렸을 경우 발생하는 에러를 예외 처리하여 새 데이터로 덮어씀
+            new_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
     else:
         new_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
     
