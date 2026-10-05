@@ -10,9 +10,6 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 import FinanceDataReader as fdr
 
-# ==========================================
-# 1. 환경 변수 및 시크릿 키 로드
-# ==========================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GSHEET_URL = os.environ.get("GSHEET_URL")
@@ -37,14 +34,9 @@ def send_telegram_message(message):
         print(f"텔레그램 알림 실패: {e}")
 
 def get_kis_access_token():
-    path = "/oauth2/tokenP"
-    url = f"{KIS_BASE_URL}{path}"
+    url = f"{KIS_BASE_URL}/oauth2/tokenP"
     headers = {"content-type": "application/json"}
-    body = {
-        "grant_type": "client_credentials",
-        "appkey": APP_KEY,
-        "appsecret": APP_SECRET
-    }
+    body = {"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}
     try:
         res = requests.post(url, headers=headers, data=json.dumps(body))
         return res.json().get("access_token")
@@ -65,12 +57,9 @@ def get_all_target_symbols():
     final_symbols_df.drop_duplicates(subset=['종목코드'], inplace=True)
     return final_symbols_df.to_dict('records')
 
-# ==========================================
-# 3. 데이터 수집 로직 (시세 + 재무 + 수급 3-Track)
-# ==========================================
 def fetch_market_data():
     today_str = datetime.now().strftime("%Y-%m-%d")
-    print(f"[{today_str}] API 전체 종목 데이터 수집 시작 (시세/재무/수급)...")
+    print(f"[{today_str}] API 전체 종목 데이터 수집 시작 (금액 기반)...")
     
     access_token = get_kis_access_token()
     if not access_token:
@@ -92,7 +81,7 @@ def fetch_market_data():
         params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
         
         try:
-            # [API 1] 시세 및 기본 지표
+            # 1. 시세 및 기본 지표
             url_price = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
             headers_price = headers.copy()
             headers_price["tr_id"] = "FHKST01010100"
@@ -100,7 +89,7 @@ def fetch_market_data():
             data_price = res_price.json()
             time.sleep(0.06) 
             
-            # [API 2] 기업 재무비율 (ETF 제외)
+            # 2. 기업 재무비율 (ETF 제외)
             roe_val, lblt_rate, rsrv_rate = 0.0, 0.0, 0.0
             if not is_etf:
                 url_fin = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/finance/financial-ratio"
@@ -118,8 +107,8 @@ def fetch_market_data():
                     except: pass
                 time.sleep(0.06)
                 
-            # [API 3] 당일 외국인/기관 수급 동향 (순매수 수량)
-            frgn_net, orgn_net = 0, 0
+            # 3. 당일 외국인/기관 수급 동향 (순매수 수량 추출)
+            frgn_net_qty, orgn_net_qty = 0, 0
             url_inv = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor"
             headers_inv = headers.copy()
             headers_inv["tr_id"] = "FHKST01010900"
@@ -129,23 +118,29 @@ def fetch_market_data():
                 output_inv = data_inv.get('output', [])
                 if len(output_inv) > 0:
                     today_inv = output_inv[0]
-                    try: frgn_net = int(today_inv.get('frgn_ntby_qty', 0))
+                    try: frgn_net_qty = int(today_inv.get('frgn_ntby_qty', 0))
                     except: pass
-                    try: orgn_net = int(today_inv.get('orgn_ntby_qty', 0))
+                    try: orgn_net_qty = int(today_inv.get('orgn_ntby_qty', 0))
                     except: pass
             time.sleep(0.06)
             
             # 행 병합
             if data_price.get('rt_cd') == '0':
                 output_price = data_price.get('output', {})
+                close_price = int(output_price.get('stck_prpr', 0))
+                
+                # ⭐ 핵심 변경: 수량을 금액(원)으로 변환 = 수량 × 종가
+                frgn_net_amt = frgn_net_qty * close_price
+                orgn_net_amt = orgn_net_qty * close_price
+                
                 row = {
                     "날짜": today_str,
                     "종목코드": code,
                     "종목명": item['종목명'],
                     "업종": item['업종'],
-                    "종가": int(output_price.get('stck_prpr', 0)),
-                    "외국인순매수": frgn_net, 
-                    "기관순매수": orgn_net,
+                    "종가": close_price,
+                    "외국인순매수": frgn_net_amt, # 컬럼명은 그대로 유지(충돌 방지), 값은 '금액'
+                    "기관순매수": orgn_net_amt,   # 컬럼명은 그대로 유지(충돌 방지), 값은 '금액'
                     "PER": float(output_price.get('per', 0)) if not is_etf and output_price.get('per') else 0.0,
                     "PBR": float(output_price.get('pbr', 0)) if not is_etf and output_price.get('pbr') else 0.0,
                     "ROE": roe_val, 
@@ -219,7 +214,6 @@ if __name__ == "__main__":
     try:
         daily_df = fetch_market_data()
         save_to_hybrid_storage(daily_df)
-        
         success_msg = f"✅ [데이터 수집 완료]\n날짜: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n수집 종목 수: {len(daily_df):,}개\n구글 드라이브 업데이트 성공"
         send_telegram_message(success_msg)
     except Exception as e:
