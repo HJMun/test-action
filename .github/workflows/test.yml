@@ -9,20 +9,23 @@ on:
 
 jobs:
   collect-data:
-    runs-on: ubuntu-latest
+    # 우분투 최신 버전 명시 (경고창 제거)
+    runs-on: ubuntu-24.04 
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4 # Node.js 경고 제거를 위해 v4로 업그레이드
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # Node.js 경고 제거를 위해 v5로 업그레이드
         with:
           python-version: '3.11'
 
       - name: Install Dependencies
+        # 에러 방지를 위해 필요한 모든 라이브러리를 직접 명확하게 설치하도록 수정
         run: |
-          pip install -r requirements.txt google-api-python-client finance-datareader
+          python -m pip install --upgrade pip
+          pip install pandas requests gspread google-api-python-client finance-datareader beautifulsoup4
 
       - name: Run Collector and Screener
         env:
@@ -44,7 +47,3 @@ jobs:
           git add market_data_archive.csv
           git commit -m "Auto-update market data archive" || echo "No changes to commit"
           git push
-          
-      - name: Install Dependencies
-        run: |
-          pip install -r requirements.txt google-api-python-client finance-datareader beautifulsoup4ㄴ
