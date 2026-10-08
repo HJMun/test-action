@@ -1,10 +1,8 @@
 import os
 import time
 import json
-import re
 import requests
 import pandas as pd
-from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
@@ -58,34 +56,25 @@ def get_all_target_symbols():
     final_symbols_df.drop_duplicates(subset=['종목코드'], inplace=True)
     return final_symbols_df.to_dict('records')
 
-def get_naver_finance(code):
-    url = f"https://finance.naver.com/item/main.naver?code={code}"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    roe_val, lblt_rate, rsrv_rate = 0.0, 0.0, 0.0
-    try:
-        res = requests.get(url, headers=headers, timeout=3)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        def extract_value(keyword):
-            th = soup.find('th', string=re.compile(keyword))
-            if th:
-                tr = th.parent
-                tds = tr.find_all('td')
-                vals = [td.text.strip().replace(',', '') for td in tds if td.text.strip() not in ['', '-', 'N/A']]
-                if vals:
-                    return float(vals[-1])
-            return 0.0
-
-        roe_val = extract_value('ROE')
-        lblt_rate = extract_value('부채비율')
-        rsrv_rate = extract_value('유보율')
-    except Exception:
-        pass
-    return roe_val, lblt_rate, rsrv_rate
+# ⭐ 핵심 추가: 한투 API 속도 위반(Rate Limit) 방어 및 재시도 함수
+def safe_kis_request(url, headers, params):
+    for _ in range(3):  # 에러 발생 시 최대 3번까지 재시도
+        try:
+            res = requests.get(url, headers=headers, params=params, timeout=5)
+            data = res.json()
+            
+            # 한투 서버가 "초당 거래건수 초과" 에러(rt_cd != 0)를 뱉으면 1초 쉬었다가 다시 찌름
+            if data.get('rt_cd') != '0' and ('초과' in data.get('msg1', '') or 'EGW' in data.get('msg_cd', '')):
+                time.sleep(1.0)
+                continue
+            return data
+        except Exception:
+            time.sleep(1.0)
+    return {}
 
 def fetch_market_data():
     today_str = datetime.now().strftime("%Y-%m-%d")
-    print(f"[{today_str}] 시세/수급(한투API) + 재무(네이버 크롤링) 하이브리드 수집 시작...")
+    print(f"[{today_str}] 한국투자증권 API 안전 수집 시작 (속도 제어 모드)...")
     
     access_token = get_kis_access_token()
     if not access_token:
@@ -102,43 +91,51 @@ def fetch_market_data():
         params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
         
         try:
-            # 1. 시세 (한투)
-            res_price = requests.get(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price", headers={**headers, "tr_id": "FHKST01010100"}, params=params)
-            data_price = res_price.json()
-            time.sleep(0.05)
+            # 1. 시세 데이터
+            url_price = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
+            headers_price = {**headers, "tr_id": "FHKST01010100"}
+            data_price = safe_kis_request(url_price, headers_price, params)
+            time.sleep(0.08) # 0.08초 대기 (안전 속도)
             
-            # 2. 재무 (네이버)
+            # 2. 재무 데이터 (ETF 제외)
             roe_val, lblt_rate, rsrv_rate = 0.0, 0.0, 0.0
             if not is_etf:
-                roe_val, lblt_rate, rsrv_rate = get_naver_finance(code)
+                url_fin = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/finance/financial-ratio"
+                headers_fin = {**headers, "tr_id": "FHKST1060000C"}
+                data_fin = safe_kis_request(url_fin, headers_fin, params)
                 
-            # 3. 수급 (한투)
+                if data_fin.get('rt_cd') == '0':
+                    output_fin = data_fin.get('output', {})
+                    try: roe_val = float(output_fin.get('roe_val', 0.0))
+                    except: pass
+                    try: lblt_rate = float(output_fin.get('lblt_rate', 0.0))
+                    except: pass
+                    try: rsrv_rate = float(output_fin.get('rsrv_rate', 0.0))
+                    except: pass
+                time.sleep(0.08)
+                
+            # 3. 수급 데이터 (당일 외국인/기관 매수 수량)
             frgn_net_qty, orgn_net_qty = 0, 0
-            res_inv = requests.get(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor", headers={**headers, "tr_id": "FHKST01010900"}, params=params)
-            data_inv = res_inv.json()
+            url_inv = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor"
+            headers_inv = {**headers, "tr_id": "FHKST01010900"}
+            data_inv = safe_kis_request(url_inv, headers_inv, params)
             
             if data_inv.get('rt_cd') == '0':
                 output_inv = data_inv.get('output', [])
                 if len(output_inv) > 0:
                     today_inv = output_inv[0]
-                    # 들여쓰기와 try-except 구문을 명확하게 분리하여 문법 에러 원천 차단
-                    try: 
-                        frgn_net_qty = int(today_inv.get('frgn_ntby_qty', 0))
-                    except Exception: 
-                        pass
-                        
-                    try: 
-                        orgn_net_qty = int(today_inv.get('orgn_ntby_qty', 0))
-                    except Exception: 
-                        pass
+                    try: frgn_net_qty = int(today_inv.get('frgn_ntby_qty', 0))
+                    except: pass
+                    try: orgn_net_qty = int(today_inv.get('orgn_ntby_qty', 0))
+                    except: pass
+            time.sleep(0.08)
             
-            time.sleep(0.05)
-            
-            # 행 병합
+            # 4. 데이터 병합
             if data_price.get('rt_cd') == '0':
                 output_price = data_price.get('output', {})
                 close_price = int(output_price.get('stck_prpr', 0))
                 
+                # 수량 × 종가 = 매집 금액(원) 변환
                 frgn_net_amt = frgn_net_qty * close_price
                 orgn_net_amt = orgn_net_qty * close_price
                 
