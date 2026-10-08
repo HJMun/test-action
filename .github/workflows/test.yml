@@ -44,3 +44,7 @@ jobs:
           git add market_data_archive.csv
           git commit -m "Auto-update market data archive" || echo "No changes to commit"
           git push
+          
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt google-api-python-client finance-datareader beautifulsoup4ㄴ
