@@ -58,7 +58,6 @@ def get_all_target_symbols():
     final_symbols_df.drop_duplicates(subset=['종목코드'], inplace=True)
     return final_symbols_df.to_dict('records')
 
-# ⭐ 추가된 함수: 네이버 금융에서 재무데이터 크롤링
 def get_naver_finance(code):
     url = f"https://finance.naver.com/item/main.naver?code={code}"
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -80,7 +79,7 @@ def get_naver_finance(code):
         roe_val = extract_value('ROE')
         lblt_rate = extract_value('부채비율')
         rsrv_rate = extract_value('유보율')
-    except:
+    except Exception:
         pass
     return roe_val, lblt_rate, rsrv_rate
 
@@ -108,7 +107,7 @@ def fetch_market_data():
             data_price = res_price.json()
             time.sleep(0.05)
             
-            # 2. 재무 (네이버) - 기존 한투 API 대신 크롤링 사용
+            # 2. 재무 (네이버)
             roe_val, lblt_rate, rsrv_rate = 0.0, 0.0, 0.0
             if not is_etf:
                 roe_val, lblt_rate, rsrv_rate = get_naver_finance(code)
@@ -117,3 +116,115 @@ def fetch_market_data():
             frgn_net_qty, orgn_net_qty = 0, 0
             res_inv = requests.get(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor", headers={**headers, "tr_id": "FHKST01010900"}, params=params)
             data_inv = res_inv.json()
+            
+            if data_inv.get('rt_cd') == '0':
+                output_inv = data_inv.get('output', [])
+                if len(output_inv) > 0:
+                    today_inv = output_inv[0]
+                    # 들여쓰기와 try-except 구문을 명확하게 분리하여 문법 에러 원천 차단
+                    try: 
+                        frgn_net_qty = int(today_inv.get('frgn_ntby_qty', 0))
+                    except Exception: 
+                        pass
+                        
+                    try: 
+                        orgn_net_qty = int(today_inv.get('orgn_ntby_qty', 0))
+                    except Exception: 
+                        pass
+            
+            time.sleep(0.05)
+            
+            # 행 병합
+            if data_price.get('rt_cd') == '0':
+                output_price = data_price.get('output', {})
+                close_price = int(output_price.get('stck_prpr', 0))
+                
+                frgn_net_amt = frgn_net_qty * close_price
+                orgn_net_amt = orgn_net_qty * close_price
+                
+                row = {
+                    "날짜": today_str,
+                    "종목코드": code,
+                    "종목명": item['종목명'],
+                    "업종": item['업종'],
+                    "종가": close_price,
+                    "외국인순매수": frgn_net_amt,
+                    "기관순매수": orgn_net_amt,
+                    "PER": float(output_price.get('per', 0)) if not is_etf and output_price.get('per') else 0.0,
+                    "PBR": float(output_price.get('pbr', 0)) if not is_etf and output_price.get('pbr') else 0.0,
+                    "ROE": roe_val, 
+                    "부채비율": lblt_rate, 
+                    "유보율": rsrv_rate
+                }
+                market_data.append(row)
+                
+        except Exception as e:
+            print(f"{code} 수집 에러: {e}")
+            continue
+
+    df = pd.DataFrame(market_data)
+    return df
+
+def save_to_hybrid_storage(new_df):
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    csv_filename = "market_data_archive.csv"
+    
+    if os.path.exists(csv_filename):
+        try:
+            archive_df = pd.read_csv(csv_filename)
+            archive_df = pd.concat([archive_df, new_df], ignore_index=True)
+            archive_df.drop_duplicates(subset=['날짜', '종목코드'], keep='last', inplace=True)
+            archive_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
+        except pd.errors.EmptyDataError:
+            new_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
+    else:
+        new_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
+    
+    try:
+        credentials = Credentials.from_service_account_info(eval(GCP_JSON), scopes=SCOPES)
+        drive_service = build('drive', 'v3', credentials=credentials)
+        
+        query_csv = f"name='{csv_filename}' and '{GDRIVE_FOLDER_ID}' in parents and trashed=false"
+        csv_results = drive_service.files().list(q=query_csv, spaces='drive').execute()
+        csv_items = csv_results.get('files', [])
+        
+        media = MediaFileUpload(csv_filename, mimetype='text/csv', resumable=True)
+        if not csv_items:
+            file_metadata = {'name': csv_filename, 'parents': [GDRIVE_FOLDER_ID]}
+            drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+        else:
+            file_id = csv_items[0].get('id')
+            drive_service.files().update(fileId=file_id, media_body=media).execute()
+
+        gc = gspread.authorize(credentials)
+        sheet = gc.open_by_url(GSHEET_URL).worksheet("RawData")
+        
+        existing_data = sheet.get_all_records()
+        existing_df = pd.DataFrame(existing_data)
+        
+        if not existing_df.empty:
+            existing_df['날짜'] = pd.to_datetime(existing_df['날짜'])
+            cutoff_date = pd.to_datetime(today_str) - timedelta(days=30)
+            recent_df = existing_df[existing_df['날짜'] >= cutoff_date].copy()
+            recent_df['날짜'] = recent_df['날짜'].dt.strftime("%Y-%m-%d")
+            final_df = pd.concat([recent_df, new_df], ignore_index=True)
+            final_df.drop_duplicates(subset=['날짜', '종목코드'], keep='last', inplace=True)
+        else:
+            final_df = new_df
+            
+        sheet.clear()
+        sheet.update([final_df.columns.values.tolist()] + final_df.values.tolist())
+        
+    except Exception as e:
+        print(f"구글 저장 실패: {e}")
+        raise e
+
+if __name__ == "__main__":
+    try:
+        daily_df = fetch_market_data()
+        save_to_hybrid_storage(daily_df)
+        success_msg = f"✅ [데이터 수집 완료]\n날짜: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n수집 종목 수: {len(daily_df):,}개\n구글 드라이브 업데이트 성공"
+        send_telegram_message(success_msg)
+    except Exception as e:
+        error_msg = f"🚨 [데이터 수집 에러]\n내용: {str(e)}"
+        send_telegram_message(error_msg)
