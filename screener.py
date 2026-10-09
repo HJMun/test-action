@@ -21,6 +21,10 @@ def get_screened_stocks(csv_path="market_data_archive.csv"):
     try:
         df = pd.read_csv(csv_path)
         df['날짜'] = pd.to_datetime(df['날짜'])
+        
+        # 일일 모니터링 제외 대상 필터링
+        df = df[df['종목명'] != '오이솔루션']
+        
     except FileNotFoundError:
         return None, None
 
@@ -28,21 +32,26 @@ def get_screened_stocks(csv_path="market_data_archive.csv"):
     latest_df = df[df['날짜'] == latest_date].copy()
     results = {}
 
-    # 1. 방어형 가치주
+    # 1. 방어형 가치주 (기존 엄격한 조건 유지)
     cond1 = (latest_df['PER'] > 0) & (latest_df['PER'] <= 10)
     cond2 = (latest_df['PBR'] > 0) & (latest_df['PBR'] <= 1)
     cond3 = (latest_df['부채비율'] > 0) & (latest_df['부채비율'] <= 100)
     results['graham'] = latest_df[cond1 & cond2 & cond3].sort_values('PBR').head(3)
 
-    # 2. 마법공식
-    mf_df = latest_df[(latest_df['PER'] > 0) & (latest_df['ROE'] > 0)].copy()
+    # ⭐ 핵심 업데이트: 잡주 필터링 (일회성 이익 및 자본잠식 착시 제거)
+    # PER 2 이상 50 이하, ROE 5 이상 40 이하인 정상 기업만 통과
+    safe_cond = (latest_df['PER'] >= 2.0) & (latest_df['PER'] <= 50.0) & \
+                (latest_df['ROE'] >= 5.0) & (latest_df['ROE'] <= 40.0)
+
+    # 2. 마법공식 (안전장치 적용)
+    mf_df = latest_df[safe_cond].copy()
     mf_df['PER_Rank'] = mf_df['PER'].rank(ascending=True)
     mf_df['ROE_Rank'] = mf_df['ROE'].rank(ascending=False)
     mf_df['Magic_Score'] = mf_df['PER_Rank'] + mf_df['ROE_Rank']
     results['magic'] = mf_df.sort_values('Magic_Score').head(3)
 
-    # 3. 피터 린치 성장주 (PEG 계산)
-    lynch_df = latest_df[(latest_df['PER'] > 0) & (latest_df['ROE'] > 0)].copy()
+    # 3. 피터 린치 성장주 (안전장치 적용)
+    lynch_df = latest_df[safe_cond].copy()
     lynch_df['PEG'] = lynch_df['PER'] / lynch_df['ROE']
     cond_lynch = (lynch_df['PEG'] > 0) & (lynch_df['PEG'] <= 0.5)
     results['lynch'] = lynch_df[cond_lynch].sort_values('PEG').head(3)
@@ -125,7 +134,6 @@ def send_daily_briefing():
     else: msg += "• 조건 만족 종목 없음\n"
     msg += "\n"
 
-    # ⭐ 피터 린치 부활 구역
     msg += "<b>🚀 3. 피터린치 성장주 (PEG 0.5↓)</b>\n"
     if not screened_data['lynch'].empty:
         for _, row in screened_data['lynch'].iterrows():
