@@ -1,8 +1,10 @@
 import os
 import time
 import json
+import re
 import requests
 import pandas as pd
+from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
@@ -51,19 +53,15 @@ def get_all_target_symbols():
     etf_df = fdr.StockListing('ETF/KR')
     etf_df = etf_df[['Symbol', 'Name']].rename(columns={'Symbol': '종목코드', 'Name': '종목명'})
     etf_df['업종'] = 'ETF'
-
     final_symbols_df = pd.concat([krx_df, etf_df], ignore_index=True)
     final_symbols_df.drop_duplicates(subset=['종목코드'], inplace=True)
     return final_symbols_df.to_dict('records')
 
-# ⭐ 핵심 추가: 한투 API 속도 위반(Rate Limit) 방어 및 재시도 함수
 def safe_kis_request(url, headers, params):
-    for _ in range(3):  # 에러 발생 시 최대 3번까지 재시도
+    for _ in range(3):
         try:
             res = requests.get(url, headers=headers, params=params, timeout=5)
             data = res.json()
-            
-            # 한투 서버가 "초당 거래건수 초과" 에러(rt_cd != 0)를 뱉으면 1초 쉬었다가 다시 찌름
             if data.get('rt_cd') != '0' and ('초과' in data.get('msg1', '') or 'EGW' in data.get('msg_cd', '')):
                 time.sleep(1.0)
                 continue
@@ -72,9 +70,37 @@ def safe_kis_request(url, headers, params):
             time.sleep(1.0)
     return {}
 
+# ⭐ 비장의 무기 2: 완벽하게 크롬 브라우저로 위장한 네이버 크롤러
+def get_naver_finance(code):
+    url = f"https://finance.naver.com/item/main.naver?code={code}"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
+    }
+    lblt_rate, rsrv_rate = 0.0, 0.0
+    try:
+        res = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        def extract_value(keyword):
+            th = soup.find('th', string=re.compile(keyword))
+            if th:
+                tr = th.parent
+                tds = tr.find_all('td')
+                vals = [td.text.strip().replace(',', '') for td in tds if td.text.strip() not in ['', '-', 'N/A']]
+                if vals:
+                    return float(vals[-1])
+            return 0.0
+            
+        lblt_rate = extract_value('부채비율')
+        rsrv_rate = extract_value('유보율')
+    except Exception:
+        pass
+    return lblt_rate, rsrv_rate
+
 def fetch_market_data():
     today_str = datetime.now().strftime("%Y-%m-%d")
-    print(f"[{today_str}] 한국투자증권 API 안전 수집 시작 (속도 제어 모드)...")
+    print(f"[{today_str}] 데이터 수집 시작 (시세/수급 + 수학공식 + 네이버위장크롤링)...")
     
     access_token = get_kis_access_token()
     if not access_token:
@@ -91,35 +117,24 @@ def fetch_market_data():
         params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
         
         try:
-            # 1. 시세 데이터
+            # 1. 시세 데이터 (PER, PBR 포함)
             url_price = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
             headers_price = {**headers, "tr_id": "FHKST01010100"}
             data_price = safe_kis_request(url_price, headers_price, params)
-            time.sleep(0.08) # 0.08초 대기 (안전 속도)
+            time.sleep(0.06) 
             
-            # 2. 재무 데이터 (ETF 제외)
-            roe_val, lblt_rate, rsrv_rate = 0.0, 0.0, 0.0
-            if not is_etf:
-                url_fin = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/finance/financial-ratio"
-                headers_fin = {**headers, "tr_id": "FHKST1060000C"}
-                data_fin = safe_kis_request(url_fin, headers_fin, params)
-                
-                if data_fin.get('rt_cd') == '0':
-                    output_fin = data_fin.get('output', {})
-                    try: roe_val = float(output_fin.get('roe_val', 0.0))
-                    except: pass
-                    try: lblt_rate = float(output_fin.get('lblt_rate', 0.0))
-                    except: pass
-                    try: rsrv_rate = float(output_fin.get('rsrv_rate', 0.0))
-                    except: pass
-                time.sleep(0.08)
-                
-            # 3. 수급 데이터 (당일 외국인/기관 매수 수량)
-            frgn_net_qty, orgn_net_qty = 0, 0
+            output_price = data_price.get('output', {}) if data_price.get('rt_cd') == '0' else {}
+            close_price = int(output_price.get('stck_prpr', 0))
+            per = float(output_price.get('per', 0)) if output_price.get('per') else 0.0
+            pbr = float(output_price.get('pbr', 0)) if output_price.get('pbr') else 0.0
+            
+            # 2. 수급 데이터 
             url_inv = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor"
             headers_inv = {**headers, "tr_id": "FHKST01010900"}
             data_inv = safe_kis_request(url_inv, headers_inv, params)
+            time.sleep(0.06)
             
+            frgn_net_qty, orgn_net_qty = 0, 0
             if data_inv.get('rt_cd') == '0':
                 output_inv = data_inv.get('output', [])
                 if len(output_inv) > 0:
@@ -128,32 +143,37 @@ def fetch_market_data():
                     except: pass
                     try: orgn_net_qty = int(today_inv.get('orgn_ntby_qty', 0))
                     except: pass
-            time.sleep(0.08)
+
+            # 3. 재무 데이터 (비장의 무기 적용 구역)
+            roe_val, lblt_rate, rsrv_rate = 0.0, 0.0, 0.0
+            if not is_etf and close_price > 0:
+                # ⭐ 비장의 무기 1: ROE 수학적 도출 (ROE = PBR / PER * 100)
+                if per > 0 and pbr > 0:
+                    roe_val = round((pbr / per) * 100, 2)
+                
+                # 네이버 위장 크롤링 (부채비율, 유보율)
+                lblt_rate, rsrv_rate = get_naver_finance(code)
+                time.sleep(0.1) # 안전하게 0.1초 쉬어가기
+                
+            # 4. 데이터 병합 (수량을 금액으로 변환)
+            frgn_net_amt = frgn_net_qty * close_price
+            orgn_net_amt = orgn_net_qty * close_price
             
-            # 4. 데이터 병합
-            if data_price.get('rt_cd') == '0':
-                output_price = data_price.get('output', {})
-                close_price = int(output_price.get('stck_prpr', 0))
-                
-                # 수량 × 종가 = 매집 금액(원) 변환
-                frgn_net_amt = frgn_net_qty * close_price
-                orgn_net_amt = orgn_net_qty * close_price
-                
-                row = {
-                    "날짜": today_str,
-                    "종목코드": code,
-                    "종목명": item['종목명'],
-                    "업종": item['업종'],
-                    "종가": close_price,
-                    "외국인순매수": frgn_net_amt,
-                    "기관순매수": orgn_net_amt,
-                    "PER": float(output_price.get('per', 0)) if not is_etf and output_price.get('per') else 0.0,
-                    "PBR": float(output_price.get('pbr', 0)) if not is_etf and output_price.get('pbr') else 0.0,
-                    "ROE": roe_val, 
-                    "부채비율": lblt_rate, 
-                    "유보율": rsrv_rate
-                }
-                market_data.append(row)
+            row = {
+                "날짜": today_str,
+                "종목코드": code,
+                "종목명": item['종목명'],
+                "업종": item['업종'],
+                "종가": close_price,
+                "외국인순매수": frgn_net_amt,
+                "기관순매수": orgn_net_amt,
+                "PER": per,
+                "PBR": pbr,
+                "ROE": roe_val, 
+                "부채비율": lblt_rate, 
+                "유보율": rsrv_rate
+            }
+            market_data.append(row)
                 
         except Exception as e:
             print(f"{code} 수집 에러: {e}")
