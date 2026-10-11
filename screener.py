@@ -12,19 +12,16 @@ def send_telegram_message(message):
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
-    try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print(f"텔레그램 알림 실패: {e}")
+    try: requests.post(url, json=payload)
+    except: pass
 
 def get_screened_stocks(csv_path="market_data_archive.csv"):
     try:
-        df = pd.read_csv(csv_path)
+        # 종목코드를 강제로 6자리 문자열로 읽기
+        df = pd.read_csv(csv_path, dtype={'종목코드': str})
+        df['종목코드'] = df['종목코드'].astype(str).str.zfill(6)
         df['날짜'] = pd.to_datetime(df['날짜'])
-        
-        # 일일 모니터링 제외 대상 필터링
         df = df[df['종목명'] != '오이솔루션']
-        
     except FileNotFoundError:
         return None, None
 
@@ -32,25 +29,29 @@ def get_screened_stocks(csv_path="market_data_archive.csv"):
     latest_df = df[df['날짜'] == latest_date].copy()
     results = {}
 
-    # 1. 방어형 가치주 (기존 엄격한 조건 유지)
-    cond1 = (latest_df['PER'] > 0) & (latest_df['PER'] <= 10)
-    cond2 = (latest_df['PBR'] > 0) & (latest_df['PBR'] <= 1)
-    cond3 = (latest_df['부채비율'] > 0) & (latest_df['부채비율'] <= 100)
-    results['graham'] = latest_df[cond1 & cond2 & cond3].sort_values('PBR').head(3)
+    # 💡 프로 필터 1: 시가총액 500억 이상 (잡주/유동성 부족 제외)
+    # 💡 프로 필터 2: NaN(비어있는 재무 데이터) 제외 로직 추가 (.notna())
+    
+    # 1. 방어형 가치주 (+ 시총 500억 이상)
+    cond_graham = (latest_df['PER'].notna()) & (latest_df['PER'] > 0) & (latest_df['PER'] <= 10) & \
+                  (latest_df['PBR'].notna()) & (latest_df['PBR'] > 0) & (latest_df['PBR'] <= 1) & \
+                  (latest_df['부채비율'].notna()) & (latest_df['부채비율'] > 0) & (latest_df['부채비율'] <= 100) & \
+                  (latest_df['시가총액_억원'].notna()) & (latest_df['시가총액_억원'] >= 500)
+    results['graham'] = latest_df[cond_graham].sort_values('PBR').head(3)
 
-    # ⭐ 핵심 업데이트: 잡주 필터링 (일회성 이익 및 자본잠식 착시 제거)
-    # PER 2 이상 50 이하, ROE 5 이상 40 이하인 정상 기업만 통과
-    safe_cond = (latest_df['PER'] >= 2.0) & (latest_df['PER'] <= 50.0) & \
-                (latest_df['ROE'] >= 5.0) & (latest_df['ROE'] <= 40.0)
+    # 안전 필터 (마법공식/피터린치 공통)
+    safe_cond = (latest_df['PER'].notna()) & (latest_df['PER'] >= 2.0) & (latest_df['PER'] <= 50.0) & \
+                (latest_df['ROE'].notna()) & (latest_df['ROE'] >= 5.0) & (latest_df['ROE'] <= 40.0) & \
+                (latest_df['시가총액_억원'].notna()) & (latest_df['시가총액_억원'] >= 500)
 
-    # 2. 마법공식 (안전장치 적용)
+    # 2. 마법공식
     mf_df = latest_df[safe_cond].copy()
     mf_df['PER_Rank'] = mf_df['PER'].rank(ascending=True)
     mf_df['ROE_Rank'] = mf_df['ROE'].rank(ascending=False)
     mf_df['Magic_Score'] = mf_df['PER_Rank'] + mf_df['ROE_Rank']
     results['magic'] = mf_df.sort_values('Magic_Score').head(3)
 
-    # 3. 피터 린치 성장주 (안전장치 적용)
+    # 3. 피터 린치 성장주
     lynch_df = latest_df[safe_cond].copy()
     lynch_df['PEG'] = lynch_df['PER'] / lynch_df['ROE']
     cond_lynch = (lynch_df['PEG'] > 0) & (lynch_df['PEG'] <= 0.5)
@@ -65,7 +66,6 @@ def get_screened_stocks(csv_path="market_data_archive.csv"):
     
     for code, group in period_df.groupby('종목코드'):
         if len(group) < 2: continue
-        
         group = group.sort_values('날짜')
         start_price = group.iloc[0]['종가']
         end_price = group.iloc[-1]['종가']
@@ -73,27 +73,23 @@ def get_screened_stocks(csv_path="market_data_archive.csv"):
         
         price_return = ((end_price - start_price) / start_price) * 100
         
-        total_foreign_amt = group['외국인순매수'].sum()
-        total_org_amt = group['기관순매수'].sum()
+        total_foreign_amt = group['외인매수_억원'].sum()
+        total_org_amt = group['기관매수_억원'].sum()
         total_smart_money_amt = total_foreign_amt + total_org_amt
         
-        is_etf = group.iloc[0]['업종'] == 'ETF'
+        is_etf = group.iloc[0]['시장구분'] == 'ETF'
         
         data_dict = {
             '종목코드': code,
             '종목명': group.iloc[0]['종목명'],
             '주가수익률(%)': round(price_return, 2),
-            '외인누적_억원': round(total_foreign_amt / 100000000, 1),
-            '기관누적_억원': round(total_org_amt / 100000000, 1),
-            '쌍끌이누적_억원': round(total_smart_money_amt / 100000000, 1)
+            '외인누적_억원': total_foreign_amt,
+            '쌍끌이누적_억원': total_smart_money_amt
         }
         
-        if is_etf:
-            div_data_etf.append(data_dict)
-        else:
-            div_data_stock.append(data_dict)
+        if is_etf: div_data_etf.append(data_dict)
+        else: div_data_stock.append(data_dict)
             
-    # [주식] 외인 매집 횡보주
     df_stock = pd.DataFrame(div_data_stock)
     if not df_stock.empty:
         cond_stock = (df_stock['주가수익률(%)'] <= 2.0) & (df_stock['외인누적_억원'] > 0)
@@ -101,7 +97,6 @@ def get_screened_stocks(csv_path="market_data_archive.csv"):
     else:
         results['stock_div'] = pd.DataFrame()
 
-    # [ETF] 쌍끌이 매집 바닥권
     df_etf = pd.DataFrame(div_data_etf)
     if not df_etf.empty:
         cond_etf = (df_etf['주가수익률(%)'] <= 2.0) & (df_etf['쌍끌이누적_억원'] > 0)
@@ -113,12 +108,10 @@ def get_screened_stocks(csv_path="market_data_archive.csv"):
 
 def send_daily_briefing():
     screened_data, base_date = get_screened_stocks()
-    if not screened_data:
-        send_telegram_message("🚨 데이터를 불러오지 못해 스크리닝을 건너뜁니다.")
-        return
+    if not screened_data: return
 
     date_str = base_date.strftime('%Y-%m-%d')
-    msg = f"📊 <b>오늘의 종목 발굴 브리핑</b> ({date_str})\n\n"
+    msg = f"📊 <b>오늘의 퀀트 브리핑(PRO)</b> ({date_str})\n\n"
 
     msg += "<b>🏆 1. 방어형 가치주 (PER 10↓, PBR 1↓)</b>\n"
     if not screened_data['graham'].empty:
@@ -144,17 +137,16 @@ def send_daily_briefing():
     msg += "<b>🕵️‍♂️ 4. 주식: 외인 매집 횡보주</b>\n"
     if not screened_data['stock_div'].empty:
         for _, row in screened_data['stock_div'].iterrows():
-            msg += f"• {row['종목명']} (수익:{row['주가수익률(%)']}%, 외인:{row['외인누적_억원']:,}억원)\n"
+            msg += f"• {row['종목명']} (수익:{row['주가수익률(%)']}%, 외인:{row['외인누적_억원']:.1f}억)\n"
     else: msg += "• 조건 만족 종목 없음\n"
     msg += "\n"
 
     msg += "<b>🏦 5. ETF: 바닥권 쌍끌이 매집</b>\n"
     if not screened_data['etf_div'].empty:
         for _, row in screened_data['etf_div'].iterrows():
-            msg += f"• {row['종목명']}\n  (수익:{row['주가수익률(%)']}%, 쌍끌이:{row['쌍끌이누적_억원']:,}억원)\n"
+            msg += f"• {row['종목명']}\n  (수익:{row['주가수익률(%)']}%, 쌍끌이:{row['쌍끌이누적_억원']:.1f}억)\n"
     else: msg += "• 조건 만족 종목 없음\n"
 
-    msg += "\n💡 <i>자세한 데이터는 구글 시트를 확인하세요.</i>"
     send_telegram_message(msg)
 
 if __name__ == "__main__":

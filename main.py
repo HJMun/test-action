@@ -22,40 +22,40 @@ APP_KEY = os.environ.get("APP_KEY")
 APP_SECRET = os.environ.get("APP_SECRET")
 KIS_BASE_URL = "https://openapi.koreainvestment.com:9443" 
 
-SCOPES = [
-    'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/drive'
-]
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
 
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-    try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print(f"텔레그램 알림 실패: {e}")
+    try: requests.post(url, json=payload)
+    except: pass
 
 def get_kis_access_token():
     url = f"{KIS_BASE_URL}/oauth2/tokenP"
     headers = {"content-type": "application/json"}
     body = {"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}
-    try:
-        res = requests.post(url, headers=headers, data=json.dumps(body))
-        return res.json().get("access_token")
-    except Exception as e:
-        print(f"토큰 발급 에러: {e}")
-        return None
+    try: return requests.post(url, headers=headers, data=json.dumps(body)).json().get("access_token")
+    except: return None
 
 def get_all_target_symbols():
     print("시장 전체 상장 종목 및 ETF 목록을 불러옵니다...")
+    # KRX 종목 (시장구분과 섹터 분리)
     krx_df = fdr.StockListing('KRX')
-    krx_df = krx_df[['Code', 'Name', 'Market']].rename(columns={'Code': '종목코드', 'Name': '종목명', 'Market': '업종'})
+    krx_df = krx_df[['Code', 'Name', 'Market', 'Sector']].rename(
+        columns={'Code': '종목코드', 'Name': '종목명', 'Market': '시장구분', 'Sector': '업종'}
+    )
+    krx_df['업종'] = krx_df['업종'].fillna('기타') # 섹터가 없는 경우 처리
+    krx_df['종목코드'] = krx_df['종목코드'].astype(str).str.zfill(6) # 6자리 문자 고정
+    
+    # ETF 종목
     etf_df = fdr.StockListing('ETF/KR')
     etf_df = etf_df[['Symbol', 'Name']].rename(columns={'Symbol': '종목코드', 'Name': '종목명'})
+    etf_df['시장구분'] = 'ETF'
     etf_df['업종'] = 'ETF'
-    final_symbols_df = pd.concat([krx_df, etf_df], ignore_index=True)
-    final_symbols_df.drop_duplicates(subset=['종목코드'], inplace=True)
-    return final_symbols_df.to_dict('records')
+    etf_df['종목코드'] = etf_df['종목코드'].astype(str).str.zfill(6)
+    
+    final_df = pd.concat([krx_df, etf_df], ignore_index=True).drop_duplicates(subset=['종목코드'])
+    return final_df.to_dict('records')
 
 def safe_kis_request(url, headers, params):
     for _ in range(3):
@@ -66,18 +66,15 @@ def safe_kis_request(url, headers, params):
                 time.sleep(1.0)
                 continue
             return data
-        except Exception:
-            time.sleep(1.0)
+        except: time.sleep(1.0)
     return {}
 
-# ⭐ 비장의 무기 2: 완벽하게 크롬 브라우저로 위장한 네이버 크롤러
 def get_naver_finance(code):
     url = f"https://finance.naver.com/item/main.naver?code={code}"
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
-    lblt_rate, rsrv_rate = 0.0, 0.0
+    lblt_rate, rsrv_rate, div_yield = None, None, None # 기본값을 0이 아닌 None(결측치)으로
     try:
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -87,25 +84,23 @@ def get_naver_finance(code):
             if th:
                 tr = th.parent
                 tds = tr.find_all('td')
-                vals = [td.text.strip().replace(',', '') for td in tds if td.text.strip() not in ['', '-', 'N/A']]
+                vals = [td.text.strip().replace(',', '').replace('%', '') for td in tds if td.text.strip() not in ['', '-', 'N/A']]
                 if vals:
-                    return float(vals[-1])
-            return 0.0
+                    try: return float(vals[-1])
+                    except: pass
+            return None
             
         lblt_rate = extract_value('부채비율')
         rsrv_rate = extract_value('유보율')
-    except Exception:
-        pass
-    return lblt_rate, rsrv_rate
+        div_yield = extract_value('배당수익률') # 배당수익률 추가
+    except: pass
+    return lblt_rate, rsrv_rate, div_yield
 
 def fetch_market_data():
     today_str = datetime.now().strftime("%Y-%m-%d")
-    print(f"[{today_str}] 데이터 수집 시작 (시세/수급 + 수학공식 + 네이버위장크롤링)...")
+    print(f"[{today_str}] 프로 버전 데이터 수집 시작...")
     
     access_token = get_kis_access_token()
-    if not access_token:
-        raise Exception("한투 API 토큰 발급 실패.")
-    
     symbols_list = get_all_target_symbols()
     market_data = []
     
@@ -117,83 +112,100 @@ def fetch_market_data():
         params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
         
         try:
-            # 1. 시세 데이터 (PER, PBR 포함)
-            url_price = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
-            headers_price = {**headers, "tr_id": "FHKST01010100"}
-            data_price = safe_kis_request(url_price, headers_price, params)
+            # 1. 시세 및 OHLC, 시총, 거래량
+            data_price = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price", {**headers, "tr_id": "FHKST01010100"}, params)
             time.sleep(0.06) 
             
             output_price = data_price.get('output', {}) if data_price.get('rt_cd') == '0' else {}
-            close_price = int(output_price.get('stck_prpr', 0))
-            per = float(output_price.get('per', 0)) if output_price.get('per') else 0.0
-            pbr = float(output_price.get('pbr', 0)) if output_price.get('pbr') else 0.0
             
-            # 2. 수급 데이터 
-            url_inv = f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor"
-            headers_inv = {**headers, "tr_id": "FHKST01010900"}
-            data_inv = safe_kis_request(url_inv, headers_inv, params)
+            # OHLC 및 변동성
+            close_price = int(output_price.get('stck_prpr', 0))
+            open_price = int(output_price.get('stck_oprc', 0))
+            high_price = int(output_price.get('stck_hgpr', 0))
+            low_price = int(output_price.get('stck_lwpr', 0))
+            change_rate = float(output_price.get('prdy_ctrt', 0))
+            
+            # 규모 및 유동성
+            market_cap = float(output_price.get('hts_avls', 0)) # 시가총액(억원)
+            volume = int(output_price.get('acml_vol', 0))
+            trade_value_100m = round((volume * close_price) / 100000000, 2) # 거래대금(억원)
+            
+            # 재무 비율 (없으면 0이 아닌 None 처리)
+            per = float(output_price.get('per')) if output_price.get('per') else None
+            pbr = float(output_price.get('pbr')) if output_price.get('pbr') else None
+            
+            # 2. 수급 데이터 (세부 기관 포함)
+            data_inv = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor", {**headers, "tr_id": "FHKST01010900"}, params)
             time.sleep(0.06)
             
-            frgn_net_qty, orgn_net_qty = 0, 0
+            frgn_qty, orgn_qty, pnsn_qty, pe_qty, fncg_qty = 0, 0, 0, 0, 0
             if data_inv.get('rt_cd') == '0':
-                output_inv = data_inv.get('output', [])
-                if len(output_inv) > 0:
-                    today_inv = output_inv[0]
-                    try: frgn_net_qty = int(today_inv.get('frgn_ntby_qty', 0))
-                    except: pass
-                    try: orgn_net_qty = int(today_inv.get('orgn_ntby_qty', 0))
-                    except: pass
+                out_inv = data_inv.get('output', [])
+                if len(out_inv) > 0:
+                    ti = out_inv[0]
+                    def g(k): return int(ti.get(k, 0)) if ti.get(k) else 0
+                    frgn_qty = g('frgn_ntby_qty')     # 외국인
+                    orgn_qty = g('orgn_ntby_qty')     # 기관합계
+                    pnsn_qty = g('prps_ntby_qty')     # 연기금
+                    pe_qty   = g('pe_fund_ntby_qty')  # 사모펀드
+                    fncg_qty = g('fncg_cmn_ntby_qty') # 금융투자
 
-            # 3. 재무 데이터 (비장의 무기 적용 구역)
-            roe_val, lblt_rate, rsrv_rate = 0.0, 0.0, 0.0
+            # 3. 재무 데이터 크롤링 (ROE 공식 + 네이버 배당/부채)
+            roe_val, lblt_rate, rsrv_rate, div_yield = None, None, None, None
             if not is_etf and close_price > 0:
-                # ⭐ 비장의 무기 1: ROE 수학적 도출 (ROE = PBR / PER * 100)
-                if per > 0 and pbr > 0:
+                if per and pbr and per > 0:
                     roe_val = round((pbr / per) * 100, 2)
+                lblt_rate, rsrv_rate, div_yield = get_naver_finance(code)
+                time.sleep(0.1)
                 
-                # 네이버 위장 크롤링 (부채비율, 유보율)
-                lblt_rate, rsrv_rate = get_naver_finance(code)
-                time.sleep(0.1) # 안전하게 0.1초 쉬어가기
-                
-            # 4. 데이터 병합 (수량을 금액으로 변환)
-            frgn_net_amt = frgn_net_qty * close_price
-            orgn_net_amt = orgn_net_qty * close_price
-            
-            row = {
+            # 4. 데이터 병합
+            market_data.append({
                 "날짜": today_str,
-                "종목코드": code,
+                "종목코드": code, # 6자리 문자열
                 "종목명": item['종목명'],
+                "시장구분": item['시장구분'],
                 "업종": item['업종'],
+                "시가총액_억원": market_cap,
+                "거래대금_억원": trade_value_100m,
+                "등락률(%)": change_rate,
                 "종가": close_price,
-                "외국인순매수": frgn_net_amt,
-                "기관순매수": orgn_net_amt,
+                "시가": open_price,
+                "고가": high_price,
+                "저가": low_price,
+                "거래량": volume,
+                "외인매수_억원": round(frgn_qty * close_price / 100000000, 2),
+                "기관매수_억원": round(orgn_qty * close_price / 100000000, 2),
+                "연기금매수_억원": round(pnsn_qty * close_price / 100000000, 2),
+                "사모펀드매수_억원": round(pe_qty * close_price / 100000000, 2),
+                "금융투자매수_억원": round(fncg_qty * close_price / 100000000, 2),
                 "PER": per,
                 "PBR": pbr,
                 "ROE": roe_val, 
                 "부채비율": lblt_rate, 
-                "유보율": rsrv_rate
-            }
-            market_data.append(row)
-                
+                "유보율": rsrv_rate,
+                "배당수익률(%)": div_yield
+            })
         except Exception as e:
             print(f"{code} 수집 에러: {e}")
             continue
 
-    df = pd.DataFrame(market_data)
-    return df
+    return pd.DataFrame(market_data)
 
 def save_to_hybrid_storage(new_df):
     today_str = datetime.now().strftime("%Y-%m-%d")
     csv_filename = "market_data_archive.csv"
     
+    # NaN 값을 빈 문자열로 안전하게 변환하여 구글 시트 오류 방지
+    sheet_df = new_df.fillna("") 
+    
     if os.path.exists(csv_filename):
         try:
-            archive_df = pd.read_csv(csv_filename)
+            archive_df = pd.read_csv(csv_filename, dtype={'종목코드': str})
+            archive_df['종목코드'] = archive_df['종목코드'].astype(str).str.zfill(6)
             archive_df = pd.concat([archive_df, new_df], ignore_index=True)
             archive_df.drop_duplicates(subset=['날짜', '종목코드'], keep='last', inplace=True)
             archive_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
-        except pd.errors.EmptyDataError:
-            new_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
+        except: new_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
     else:
         new_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
     
@@ -204,14 +216,11 @@ def save_to_hybrid_storage(new_df):
         query_csv = f"name='{csv_filename}' and '{GDRIVE_FOLDER_ID}' in parents and trashed=false"
         csv_results = drive_service.files().list(q=query_csv, spaces='drive').execute()
         csv_items = csv_results.get('files', [])
-        
         media = MediaFileUpload(csv_filename, mimetype='text/csv', resumable=True)
         if not csv_items:
-            file_metadata = {'name': csv_filename, 'parents': [GDRIVE_FOLDER_ID]}
-            drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+            drive_service.files().create(body={'name': csv_filename, 'parents': [GDRIVE_FOLDER_ID]}, media_body=media, fields='id').execute()
         else:
-            file_id = csv_items[0].get('id')
-            drive_service.files().update(fileId=file_id, media_body=media).execute()
+            drive_service.files().update(fileId=csv_items[0].get('id'), media_body=media).execute()
 
         gc = gspread.authorize(credentials)
         sheet = gc.open_by_url(GSHEET_URL).worksheet("RawData")
@@ -224,14 +233,14 @@ def save_to_hybrid_storage(new_df):
             cutoff_date = pd.to_datetime(today_str) - timedelta(days=30)
             recent_df = existing_df[existing_df['날짜'] >= cutoff_date].copy()
             recent_df['날짜'] = recent_df['날짜'].dt.strftime("%Y-%m-%d")
-            final_df = pd.concat([recent_df, new_df], ignore_index=True)
+            recent_df['종목코드'] = recent_df['종목코드'].astype(str).str.zfill(6)
+            final_df = pd.concat([recent_df, sheet_df], ignore_index=True)
             final_df.drop_duplicates(subset=['날짜', '종목코드'], keep='last', inplace=True)
         else:
-            final_df = new_df
+            final_df = sheet_df
             
         sheet.clear()
         sheet.update([final_df.columns.values.tolist()] + final_df.values.tolist())
-        
     except Exception as e:
         print(f"구글 저장 실패: {e}")
         raise e
@@ -240,8 +249,6 @@ if __name__ == "__main__":
     try:
         daily_df = fetch_market_data()
         save_to_hybrid_storage(daily_df)
-        success_msg = f"✅ [데이터 수집 완료]\n날짜: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n수집 종목 수: {len(daily_df):,}개\n구글 드라이브 업데이트 성공"
-        send_telegram_message(success_msg)
+        send_telegram_message(f"✅ [프로 버전 수집 완료]\n날짜: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n종목 수: {len(daily_df):,}개")
     except Exception as e:
-        error_msg = f"🚨 [데이터 수집 에러]\n내용: {str(e)}"
-        send_telegram_message(error_msg)
+        send_telegram_message(f"🚨 [수집 에러]\n{str(e)}")
