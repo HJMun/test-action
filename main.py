@@ -39,15 +39,24 @@ def get_kis_access_token():
 
 def get_all_target_symbols():
     print("시장 전체 상장 종목 및 ETF 목록을 불러옵니다...")
-    # KRX 종목 (시장구분과 섹터 분리)
     krx_df = fdr.StockListing('KRX')
+    
+    # ⭐ 핵심 수정: 최신 fdr 버전에서 분리된 '업종(Sector)' 데이터를 별도로 가져와서 안전하게 병합
+    try:
+        desc_df = fdr.StockListing('KRX-DESC')
+        krx_df = pd.merge(krx_df, desc_df[['Symbol', 'Sector']], left_on='Code', right_on='Symbol', how='left')
+    except:
+        pass
+        
+    if 'Sector' not in krx_df.columns:
+        krx_df['Sector'] = '기타'
+        
     krx_df = krx_df[['Code', 'Name', 'Market', 'Sector']].rename(
         columns={'Code': '종목코드', 'Name': '종목명', 'Market': '시장구분', 'Sector': '업종'}
     )
-    krx_df['업종'] = krx_df['업종'].fillna('기타') # 섹터가 없는 경우 처리
-    krx_df['종목코드'] = krx_df['종목코드'].astype(str).str.zfill(6) # 6자리 문자 고정
+    krx_df['업종'] = krx_df['업종'].fillna('기타')
+    krx_df['종목코드'] = krx_df['종목코드'].astype(str).str.zfill(6)
     
-    # ETF 종목
     etf_df = fdr.StockListing('ETF/KR')
     etf_df = etf_df[['Symbol', 'Name']].rename(columns={'Symbol': '종목코드', 'Name': '종목명'})
     etf_df['시장구분'] = 'ETF'
@@ -74,7 +83,7 @@ def get_naver_finance(code):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
-    lblt_rate, rsrv_rate, div_yield = None, None, None # 기본값을 0이 아닌 None(결측치)으로
+    lblt_rate, rsrv_rate, div_yield = None, None, None 
     try:
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -92,7 +101,7 @@ def get_naver_finance(code):
             
         lblt_rate = extract_value('부채비율')
         rsrv_rate = extract_value('유보율')
-        div_yield = extract_value('배당수익률') # 배당수익률 추가
+        div_yield = extract_value('배당수익률') 
     except: pass
     return lblt_rate, rsrv_rate, div_yield
 
@@ -126,11 +135,11 @@ def fetch_market_data():
             change_rate = float(output_price.get('prdy_ctrt', 0))
             
             # 규모 및 유동성
-            market_cap = float(output_price.get('hts_avls', 0)) # 시가총액(억원)
+            market_cap = float(output_price.get('hts_avls', 0)) 
             volume = int(output_price.get('acml_vol', 0))
-            trade_value_100m = round((volume * close_price) / 100000000, 2) # 거래대금(억원)
+            trade_value_100m = round((volume * close_price) / 100000000, 2) 
             
-            # 재무 비율 (없으면 0이 아닌 None 처리)
+            # 재무 비율 
             per = float(output_price.get('per')) if output_price.get('per') else None
             pbr = float(output_price.get('pbr')) if output_price.get('pbr') else None
             
@@ -144,13 +153,13 @@ def fetch_market_data():
                 if len(out_inv) > 0:
                     ti = out_inv[0]
                     def g(k): return int(ti.get(k, 0)) if ti.get(k) else 0
-                    frgn_qty = g('frgn_ntby_qty')     # 외국인
-                    orgn_qty = g('orgn_ntby_qty')     # 기관합계
-                    pnsn_qty = g('prps_ntby_qty')     # 연기금
-                    pe_qty   = g('pe_fund_ntby_qty')  # 사모펀드
-                    fncg_qty = g('fncg_cmn_ntby_qty') # 금융투자
+                    frgn_qty = g('frgn_ntby_qty')     
+                    orgn_qty = g('orgn_ntby_qty')     
+                    pnsn_qty = g('prps_ntby_qty')     
+                    pe_qty   = g('pe_fund_ntby_qty')  
+                    fncg_qty = g('fncg_cmn_ntby_qty') 
 
-            # 3. 재무 데이터 크롤링 (ROE 공식 + 네이버 배당/부채)
+            # 3. 재무 데이터 크롤링 
             roe_val, lblt_rate, rsrv_rate, div_yield = None, None, None, None
             if not is_etf and close_price > 0:
                 if per and pbr and per > 0:
@@ -161,7 +170,7 @@ def fetch_market_data():
             # 4. 데이터 병합
             market_data.append({
                 "날짜": today_str,
-                "종목코드": code, # 6자리 문자열
+                "종목코드": code, 
                 "종목명": item['종목명'],
                 "시장구분": item['시장구분'],
                 "업종": item['업종'],
@@ -195,7 +204,6 @@ def save_to_hybrid_storage(new_df):
     today_str = datetime.now().strftime("%Y-%m-%d")
     csv_filename = "market_data_archive.csv"
     
-    # NaN 값을 빈 문자열로 안전하게 변환하여 구글 시트 오류 방지
     sheet_df = new_df.fillna("") 
     
     if os.path.exists(csv_filename):
@@ -252,3 +260,5 @@ if __name__ == "__main__":
         send_telegram_message(f"✅ [프로 버전 수집 완료]\n날짜: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n종목 수: {len(daily_df):,}개")
     except Exception as e:
         send_telegram_message(f"🚨 [수집 에러]\n{str(e)}")
+        # ⭐ 핵심 수정: 에러 발생 시 깃허브 액션이 멈추도록 강제 에러 발생
+        raise e
