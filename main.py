@@ -75,42 +75,42 @@ def safe_kis_request(url, headers, params):
         except: time.sleep(1.0)
     return {}
 
-def get_naver_finance(code):
-    url = f"https://finance.naver.com/item/main.naver?code={code}"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
+# ⭐ 핵심 수정: 네이버 차단을 피하기 위해 에프앤가이드(FnGuide)로 소스 변경
+def get_fnguide_finance(code):
+    url = f"https://comp.fnguide.com/SVO2/ASP/SVD_Main.asp?pGB=1&gicode=A{code}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     lblt_rate, rsrv_rate, div_yield = None, None, None 
     try:
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # ⭐ 핵심 수정: <strong> 등 태그 방해물을 무시하고 텍스트만 추출하는 강력한 정규식 로직
-        def extract_value(keyword):
-            for th in soup.find_all(['th', 'dt']):
-                if keyword in th.get_text():
-                    tr = th.parent
-                    tds = tr.find_all('td')
-                    # 빈칸이나 '-' 문자를 제외하고 숫자/소수점/마이너스 기호만 추출
-                    vals = [re.sub(r'[^0-9.-]', '', td.get_text()) for td in tds]
-                    vals = [float(v) for v in vals if v not in ['', '-']]
-                    if vals:
-                        return vals[-1] # 가장 최근 분기/연도 데이터
+        # FnGuide 연간 재무 하이라이트 테이블(highlight_D_Y) 공략
+        table = soup.find('div', id='highlight_D_Y')
+        if not table:
+            return None, None, None
+            
+        def extract_from_row(keyword):
+            th = table.find(lambda tag: tag.name in ['th', 'dt'] and keyword in tag.get_text())
+            if th:
+                tr = th.parent
+                tds = tr.find_all('td')
+                # 빈칸, 콤마, 글자 등 쓰레기값 제거 후 숫자만 추출
+                vals = [re.sub(r'[^0-9.-]', '', td.get_text()) for td in tds]
+                vals = [float(v) for v in vals if v not in ['', '-']]
+                if vals:
+                    return vals[-1] # 가장 최근 확정 년도 데이터
             return None
             
-        lblt_rate = extract_value('부채비율')
-        rsrv_rate = extract_value('유보율')
-        
-        # 네이버는 배당수익률을 '시가배당률'이라는 단어로 혼용 표기함
-        div_yield = extract_value('시가배당률') 
-        if div_yield is None:
-            div_yield = extract_value('배당수익률')
-    except: pass
+        lblt_rate = extract_from_row('부채비율')
+        rsrv_rate = extract_from_row('유보율')
+        div_yield = extract_from_row('배당수익률')
+    except:
+        pass
     return lblt_rate, rsrv_rate, div_yield
 
 def fetch_market_data():
     today_str = datetime.now().strftime("%Y-%m-%d")
-    print(f"[{today_str}] 프로 버전 데이터 수집 시작 (결측치 완벽 제어)...")
+    print(f"[{today_str}] 프로 버전 데이터 수집 시작 (FnGuide 결측치 방어 모드)...")
     
     access_token = get_kis_access_token()
     symbols_list = get_all_target_symbols()
@@ -154,17 +154,17 @@ def fetch_market_data():
                     def g(k): return int(ti.get(k, 0)) if ti.get(k) else 0
                     frgn_qty, orgn_qty, pnsn_qty, pe_qty, fncg_qty = g('frgn_ntby_qty'), g('orgn_ntby_qty'), g('prps_ntby_qty'), g('pe_fund_ntby_qty'), g('fncg_cmn_ntby_qty') 
 
-            # 3. 재무 데이터 강력 추출 (듀얼 엔진)
+            # 3. 재무 데이터 강력 추출
             roe_val, lblt_rate, rsrv_rate, div_yield = None, None, None, None
             if not is_etf and close_price > 0:
-                # ⭐ 수정: 적자기업(PER이 마이너스)도 마이너스 ROE가 나오도록 제한 해제 (per != 0)
+                # ROE 수학적 도출
                 if per is not None and pbr is not None and per != 0:
                     roe_val = round((pbr / per) * 100, 2)
                 
-                # 정규식 업그레이드 네이버 크롤러 호출
-                lblt_rate, rsrv_rate, div_yield = get_naver_finance(code)
+                # 에프앤가이드(FnGuide) 크롤러 호출
+                lblt_rate, rsrv_rate, div_yield = get_fnguide_finance(code)
                 
-                # ⭐ 이중 안전장치: 깃허브 IP가 일시 차단되어 네이버에서 못 가져왔을 경우 한투 API로 백업 호출
+                # 한투 API 최후 백업
                 if lblt_rate is None or rsrv_rate is None:
                     data_fin = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/finance/financial-ratio", {**headers, "tr_id": "FHKST1060000C"}, params)
                     if data_fin.get('rt_cd') == '0':
@@ -224,49 +224,3 @@ def save_to_hybrid_storage(new_df):
             archive_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
         except: new_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
     else:
-        new_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
-    
-    try:
-        credentials = Credentials.from_service_account_info(eval(GCP_JSON), scopes=SCOPES)
-        drive_service = build('drive', 'v3', credentials=credentials)
-        
-        query_csv = f"name='{csv_filename}' and '{GDRIVE_FOLDER_ID}' in parents and trashed=false"
-        csv_results = drive_service.files().list(q=query_csv, spaces='drive').execute()
-        csv_items = csv_results.get('files', [])
-        media = MediaFileUpload(csv_filename, mimetype='text/csv', resumable=True)
-        if not csv_items:
-            drive_service.files().create(body={'name': csv_filename, 'parents': [GDRIVE_FOLDER_ID]}, media_body=media, fields='id').execute()
-        else:
-            drive_service.files().update(fileId=csv_items[0].get('id'), media_body=media).execute()
-
-        gc = gspread.authorize(credentials)
-        sheet = gc.open_by_url(GSHEET_URL).worksheet("RawData")
-        
-        existing_data = sheet.get_all_records()
-        existing_df = pd.DataFrame(existing_data)
-        
-        if not existing_df.empty:
-            existing_df['날짜'] = pd.to_datetime(existing_df['날짜'])
-            cutoff_date = pd.to_datetime(today_str) - timedelta(days=30)
-            recent_df = existing_df[existing_df['날짜'] >= cutoff_date].copy()
-            recent_df['날짜'] = recent_df['날짜'].dt.strftime("%Y-%m-%d")
-            recent_df['종목코드'] = recent_df['종목코드'].astype(str).str.zfill(6)
-            final_df = pd.concat([recent_df, sheet_df], ignore_index=True)
-            final_df.drop_duplicates(subset=['날짜', '종목코드'], keep='last', inplace=True)
-        else:
-            final_df = sheet_df
-            
-        sheet.clear()
-        sheet.update([final_df.columns.values.tolist()] + final_df.values.tolist())
-    except Exception as e:
-        print(f"구글 저장 실패: {e}")
-        raise e
-
-if __name__ == "__main__":
-    try:
-        daily_df = fetch_market_data()
-        save_to_hybrid_storage(daily_df)
-        send_telegram_message(f"✅ [프로 버전 수집 완료]\n날짜: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n종목 수: {len(daily_df):,}개")
-    except Exception as e:
-        send_telegram_message(f"🚨 [수집 에러]\n{str(e)}")
-        raise e
