@@ -17,27 +17,27 @@ def send_telegram_message(message):
 
 def get_screened_stocks(csv_path="market_data_archive.csv"):
     try:
-        # 종목코드를 강제로 6자리 문자열로 읽기
         df = pd.read_csv(csv_path, dtype={'종목코드': str})
         df['종목코드'] = df['종목코드'].astype(str).str.zfill(6)
         df['날짜'] = pd.to_datetime(df['날짜'])
-        df = df[df['종목명'] != '오이솔루션']
+        
+        # 일일 모니터링 제외 대상 필터링
+        exclude_list = ['오이솔루션', '디케이락', 'CJ제일제당']
+        df = df[~df['종목명'].isin(exclude_list)]
+        
     except FileNotFoundError:
         return None, None
 
     latest_date = df['날짜'].max()
     latest_df = df[df['날짜'] == latest_date].copy()
     results = {}
-
-    # 💡 프로 필터 1: 시가총액 500억 이상 (잡주/유동성 부족 제외)
-    # 💡 프로 필터 2: NaN(비어있는 재무 데이터) 제외 로직 추가 (.notna())
     
     # 1. 방어형 가치주 (+ 시총 500억 이상)
     cond_graham = (latest_df['PER'].notna()) & (latest_df['PER'] > 0) & (latest_df['PER'] <= 10) & \
                   (latest_df['PBR'].notna()) & (latest_df['PBR'] > 0) & (latest_df['PBR'] <= 1) & \
                   (latest_df['부채비율'].notna()) & (latest_df['부채비율'] > 0) & (latest_df['부채비율'] <= 100) & \
                   (latest_df['시가총액_억원'].notna()) & (latest_df['시가총액_억원'] >= 500)
-    results['graham'] = latest_df[cond_graham].sort_values('PBR').head(3)
+    results['graham'] = latest_df[cond_graham].sort_values('PBR').head(5)
 
     # 안전 필터 (마법공식/피터린치 공통)
     safe_cond = (latest_df['PER'].notna()) & (latest_df['PER'] >= 2.0) & (latest_df['PER'] <= 50.0) & \
@@ -49,13 +49,13 @@ def get_screened_stocks(csv_path="market_data_archive.csv"):
     mf_df['PER_Rank'] = mf_df['PER'].rank(ascending=True)
     mf_df['ROE_Rank'] = mf_df['ROE'].rank(ascending=False)
     mf_df['Magic_Score'] = mf_df['PER_Rank'] + mf_df['ROE_Rank']
-    results['magic'] = mf_df.sort_values('Magic_Score').head(3)
+    results['magic'] = mf_df.sort_values('Magic_Score').head(5)
 
-    # 3. 피터 린치 성장주
+    # 3. 피터 린치 성장주 (하한선 0.1 추가)
     lynch_df = latest_df[safe_cond].copy()
     lynch_df['PEG'] = lynch_df['PER'] / lynch_df['ROE']
-    cond_lynch = (lynch_df['PEG'] > 0) & (lynch_df['PEG'] <= 0.5)
-    results['lynch'] = lynch_df[cond_lynch].sort_values('PEG').head(3)
+    cond_lynch = (lynch_df['PEG'] >= 0.1) & (lynch_df['PEG'] <= 0.5)
+    results['lynch'] = lynch_df[cond_lynch].sort_values('PEG').head(5)
 
     # 4 & 5. 수급 매집 (주식 & ETF)
     fourteen_days_ago = latest_date - timedelta(days=14)
@@ -93,14 +93,14 @@ def get_screened_stocks(csv_path="market_data_archive.csv"):
     df_stock = pd.DataFrame(div_data_stock)
     if not df_stock.empty:
         cond_stock = (df_stock['주가수익률(%)'] <= 2.0) & (df_stock['외인누적_억원'] > 0)
-        results['stock_div'] = df_stock[cond_stock].sort_values('외인누적_억원', ascending=False).head(3)
+        results['stock_div'] = df_stock[cond_stock].sort_values('외인누적_억원', ascending=False).head(5)
     else:
         results['stock_div'] = pd.DataFrame()
 
     df_etf = pd.DataFrame(div_data_etf)
     if not df_etf.empty:
         cond_etf = (df_etf['주가수익률(%)'] <= 2.0) & (df_etf['쌍끌이누적_억원'] > 0)
-        results['etf_div'] = df_etf[cond_etf].sort_values('쌍끌이누적_억원', ascending=False).head(3)
+        results['etf_div'] = df_etf[cond_etf].sort_values('쌍끌이누적_억원', ascending=False).head(5)
     else:
         results['etf_div'] = pd.DataFrame()
 
@@ -127,7 +127,7 @@ def send_daily_briefing():
     else: msg += "• 조건 만족 종목 없음\n"
     msg += "\n"
 
-    msg += "<b>🚀 3. 피터린치 성장주 (PEG 0.5↓)</b>\n"
+    msg += "<b>🚀 3. 피터린치 성장주 (PEG 0.1~0.5)</b>\n"
     if not screened_data['lynch'].empty:
         for _, row in screened_data['lynch'].iterrows():
             msg += f"• {row['종목명']} (PEG:{row['PEG']:.2f}, ROE:{row['ROE']:.1f})\n"
