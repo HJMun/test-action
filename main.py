@@ -17,11 +17,9 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GSHEET_URL = os.environ.get("GSHEET_URL")
 GCP_JSON = os.environ.get("GCP_SERVICE_ACCOUNT_JSON")
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID")
-
 APP_KEY = os.environ.get("APP_KEY")
 APP_SECRET = os.environ.get("APP_SECRET")
 KIS_BASE_URL = "https://openapi.koreainvestment.com:9443" 
-
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
 
 def send_telegram_message(message):
@@ -50,22 +48,16 @@ def get_all_target_symbols():
         krx_df = pd.merge(krx_df, desc_df[['Symbol', 'Sector']], left_on='Code', right_on='Symbol', how='left')
     except Exception:
         pass
-        
     if 'Sector' not in krx_df.columns:
         krx_df['Sector'] = '기타'
-        
-    krx_df = krx_df[['Code', 'Name', 'Market', 'Sector']].rename(
-        columns={'Code': '종목코드', 'Name': '종목명', 'Market': '시장구분', 'Sector': '업종'}
-    )
+    krx_df = krx_df[['Code', 'Name', 'Market', 'Sector']].rename(columns={'Code': '종목코드', 'Name': '종목명', 'Market': '시장구분', 'Sector': '업종'})
     krx_df['업종'] = krx_df['업종'].fillna('기타')
     krx_df['종목코드'] = krx_df['종목코드'].astype(str).str.zfill(6)
-    
     etf_df = fdr.StockListing('ETF/KR')
     etf_df = etf_df[['Symbol', 'Name']].rename(columns={'Symbol': '종목코드', 'Name': '종목명'})
     etf_df['시장구분'] = 'ETF'
     etf_df['업종'] = 'ETF'
     etf_df['종목코드'] = etf_df['종목코드'].astype(str).str.zfill(6)
-    
     final_df = pd.concat([krx_df, etf_df], ignore_index=True).drop_duplicates(subset=['종목코드'])
     return final_df.to_dict('records')
 
@@ -89,11 +81,9 @@ def get_fnguide_finance(code):
     try:
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, 'html.parser')
-        
         table = soup.find('div', id='highlight_D_Y')
         if not table:
             return None, None, None
-            
         def extract_from_row(keyword):
             th = table.find(lambda tag: tag.name in ['th', 'dt'] and keyword in tag.get_text())
             if th:
@@ -104,7 +94,6 @@ def get_fnguide_finance(code):
                 if vals:
                     return vals[-1]
             return None
-            
         lblt_rate = extract_from_row('부채비율')
         rsrv_rate = extract_from_row('유보율')
         div_yield = extract_from_row('배당수익률')
@@ -115,39 +104,30 @@ def get_fnguide_finance(code):
 def fetch_market_data():
     today_str = datetime.now().strftime("%Y-%m-%d")
     print(f"[{today_str}] 프로 버전 데이터 수집 시작 (FnGuide 결측치 방어 모드)...")
-    
     access_token = get_kis_access_token()
     symbols_list = get_all_target_symbols()
     market_data = []
-    
     headers = {"content-type": "application/json", "authorization": f"Bearer {access_token}", "appkey": APP_KEY, "appsecret": APP_SECRET}
-
     for item in symbols_list:
         code = item['종목코드']
         is_etf = item['업종'] == 'ETF'
         params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
-        
         try:
             data_price = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price", {**headers, "tr_id": "FHKST01010100"}, params)
             time.sleep(0.06) 
             output_price = data_price.get('output', {}) if data_price.get('rt_cd') == '0' else {}
-            
             close_price = int(output_price.get('stck_prpr', 0))
             open_price = int(output_price.get('stck_oprc', 0))
             high_price = int(output_price.get('stck_hgpr', 0))
             low_price = int(output_price.get('stck_lwpr', 0))
             change_rate = float(output_price.get('prdy_ctrt', 0))
-            
             market_cap = float(output_price.get('hts_avls', 0)) 
             volume = int(output_price.get('acml_vol', 0))
             trade_value_100m = round((volume * close_price) / 100000000, 2) 
-            
             per = float(output_price.get('per')) if output_price.get('per') else None
             pbr = float(output_price.get('pbr')) if output_price.get('pbr') else None
-            
             data_inv = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor", {**headers, "tr_id": "FHKST01010900"}, params)
             time.sleep(0.06)
-            
             frgn_qty, orgn_qty, pnsn_qty, pe_qty, fncg_qty = 0, 0, 0, 0, 0
             if data_inv.get('rt_cd') == '0':
                 out_inv = data_inv.get('output', [])
@@ -160,14 +140,11 @@ def fetch_market_data():
                     pnsn_qty = g('prps_ntby_qty')
                     pe_qty   = g('pe_fund_ntby_qty')
                     fncg_qty = g('fncg_cmn_ntby_qty')
-
             roe_val, lblt_rate, rsrv_rate, div_yield = None, None, None, None
             if not is_etf and close_price > 0:
                 if per is not None and pbr is not None and per != 0:
                     roe_val = round((pbr / per) * 100, 2)
-                
                 lblt_rate, rsrv_rate, div_yield = get_fnguide_finance(code)
-                
                 if lblt_rate is None or rsrv_rate is None:
                     data_fin = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/finance/financial-ratio", {**headers, "tr_id": "FHKST1060000C"}, params)
                     if data_fin.get('rt_cd') == '0':
@@ -183,7 +160,6 @@ def fetch_market_data():
                             except Exception: 
                                 pass
                 time.sleep(0.1)
-                
             market_data.append({
                 "날짜": today_str,
                 "종목코드": code, 
@@ -213,14 +189,12 @@ def fetch_market_data():
         except Exception as e:
             print(f"{code} 수집 에러: {e}")
             continue
-
     return pd.DataFrame(market_data)
 
 def save_to_hybrid_storage(new_df):
     today_str = datetime.now().strftime("%Y-%m-%d")
     csv_filename = "market_data_archive.csv"
     sheet_df = new_df.fillna("") 
-    
     if os.path.exists(csv_filename):
         try:
             archive_df = pd.read_csv(csv_filename, dtype={'종목코드': str})
@@ -232,27 +206,21 @@ def save_to_hybrid_storage(new_df):
             new_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
     else:
         new_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
-    
     try:
         credentials = Credentials.from_service_account_info(eval(GCP_JSON), scopes=SCOPES)
         drive_service = build('drive', 'v3', credentials=credentials)
-        
         query_csv = f"name='{csv_filename}' and '{GDRIVE_FOLDER_ID}' in parents and trashed=false"
         csv_results = drive_service.files().list(q=query_csv, spaces='drive').execute()
         csv_items = csv_results.get('files', [])
         media = MediaFileUpload(csv_filename, mimetype='text/csv', resumable=True)
-        
         if not csv_items:
             drive_service.files().create(body={'name': csv_filename, 'parents': [GDRIVE_FOLDER_ID]}, media_body=media, fields='id').execute()
         else:
             drive_service.files().update(fileId=csv_items[0].get('id'), media_body=media).execute()
-
         gc = gspread.authorize(credentials)
         sheet = gc.open_by_url(GSHEET_URL).worksheet("RawData")
-        
         existing_data = sheet.get_all_records()
         existing_df = pd.DataFrame(existing_data)
-        
         if not existing_df.empty:
             existing_df['날짜'] = pd.to_datetime(existing_df['날짜'])
             cutoff_date = pd.to_datetime(today_str) - timedelta(days=30)
@@ -263,7 +231,6 @@ def save_to_hybrid_storage(new_df):
             final_df.drop_duplicates(subset=['날짜', '종목코드'], keep='last', inplace=True)
         else:
             final_df = sheet_df
-            
         sheet.clear()
         sheet.update([final_df.columns.values.tolist()] + final_df.values.tolist())
     except Exception as e:
