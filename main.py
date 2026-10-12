@@ -40,13 +40,10 @@ def get_kis_access_token():
 def get_all_target_symbols():
     print("시장 전체 상장 종목 및 ETF 목록을 불러옵니다...")
     krx_df = fdr.StockListing('KRX')
-    
-    # ⭐ 핵심 수정: 최신 fdr 버전에서 분리된 '업종(Sector)' 데이터를 별도로 가져와서 안전하게 병합
     try:
         desc_df = fdr.StockListing('KRX-DESC')
         krx_df = pd.merge(krx_df, desc_df[['Symbol', 'Sector']], left_on='Code', right_on='Symbol', how='left')
-    except:
-        pass
+    except: pass
         
     if 'Sector' not in krx_df.columns:
         krx_df['Sector'] = '기타'
@@ -88,26 +85,32 @@ def get_naver_finance(code):
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, 'html.parser')
         
+        # ⭐ 핵심 수정: <strong> 등 태그 방해물을 무시하고 텍스트만 추출하는 강력한 정규식 로직
         def extract_value(keyword):
-            th = soup.find('th', string=re.compile(keyword))
-            if th:
-                tr = th.parent
-                tds = tr.find_all('td')
-                vals = [td.text.strip().replace(',', '').replace('%', '') for td in tds if td.text.strip() not in ['', '-', 'N/A']]
-                if vals:
-                    try: return float(vals[-1])
-                    except: pass
+            for th in soup.find_all(['th', 'dt']):
+                if keyword in th.get_text():
+                    tr = th.parent
+                    tds = tr.find_all('td')
+                    # 빈칸이나 '-' 문자를 제외하고 숫자/소수점/마이너스 기호만 추출
+                    vals = [re.sub(r'[^0-9.-]', '', td.get_text()) for td in tds]
+                    vals = [float(v) for v in vals if v not in ['', '-']]
+                    if vals:
+                        return vals[-1] # 가장 최근 분기/연도 데이터
             return None
             
         lblt_rate = extract_value('부채비율')
         rsrv_rate = extract_value('유보율')
-        div_yield = extract_value('배당수익률') 
+        
+        # 네이버는 배당수익률을 '시가배당률'이라는 단어로 혼용 표기함
+        div_yield = extract_value('시가배당률') 
+        if div_yield is None:
+            div_yield = extract_value('배당수익률')
     except: pass
     return lblt_rate, rsrv_rate, div_yield
 
 def fetch_market_data():
     today_str = datetime.now().strftime("%Y-%m-%d")
-    print(f"[{today_str}] 프로 버전 데이터 수집 시작...")
+    print(f"[{today_str}] 프로 버전 데이터 수집 시작 (결측치 완벽 제어)...")
     
     access_token = get_kis_access_token()
     symbols_list = get_all_target_symbols()
@@ -121,29 +124,25 @@ def fetch_market_data():
         params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
         
         try:
-            # 1. 시세 및 OHLC, 시총, 거래량
+            # 1. 시세 및 유동성
             data_price = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price", {**headers, "tr_id": "FHKST01010100"}, params)
             time.sleep(0.06) 
-            
             output_price = data_price.get('output', {}) if data_price.get('rt_cd') == '0' else {}
             
-            # OHLC 및 변동성
             close_price = int(output_price.get('stck_prpr', 0))
             open_price = int(output_price.get('stck_oprc', 0))
             high_price = int(output_price.get('stck_hgpr', 0))
             low_price = int(output_price.get('stck_lwpr', 0))
             change_rate = float(output_price.get('prdy_ctrt', 0))
             
-            # 규모 및 유동성
             market_cap = float(output_price.get('hts_avls', 0)) 
             volume = int(output_price.get('acml_vol', 0))
             trade_value_100m = round((volume * close_price) / 100000000, 2) 
             
-            # 재무 비율 
             per = float(output_price.get('per')) if output_price.get('per') else None
             pbr = float(output_price.get('pbr')) if output_price.get('pbr') else None
             
-            # 2. 수급 데이터 (세부 기관 포함)
+            # 2. 기관/외인 세부 수급
             data_inv = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor", {**headers, "tr_id": "FHKST01010900"}, params)
             time.sleep(0.06)
             
@@ -153,21 +152,32 @@ def fetch_market_data():
                 if len(out_inv) > 0:
                     ti = out_inv[0]
                     def g(k): return int(ti.get(k, 0)) if ti.get(k) else 0
-                    frgn_qty = g('frgn_ntby_qty')     
-                    orgn_qty = g('orgn_ntby_qty')     
-                    pnsn_qty = g('prps_ntby_qty')     
-                    pe_qty   = g('pe_fund_ntby_qty')  
-                    fncg_qty = g('fncg_cmn_ntby_qty') 
+                    frgn_qty, orgn_qty, pnsn_qty, pe_qty, fncg_qty = g('frgn_ntby_qty'), g('orgn_ntby_qty'), g('prps_ntby_qty'), g('pe_fund_ntby_qty'), g('fncg_cmn_ntby_qty') 
 
-            # 3. 재무 데이터 크롤링 
+            # 3. 재무 데이터 강력 추출 (듀얼 엔진)
             roe_val, lblt_rate, rsrv_rate, div_yield = None, None, None, None
             if not is_etf and close_price > 0:
-                if per and pbr and per > 0:
+                # ⭐ 수정: 적자기업(PER이 마이너스)도 마이너스 ROE가 나오도록 제한 해제 (per != 0)
+                if per is not None and pbr is not None and per != 0:
                     roe_val = round((pbr / per) * 100, 2)
+                
+                # 정규식 업그레이드 네이버 크롤러 호출
                 lblt_rate, rsrv_rate, div_yield = get_naver_finance(code)
+                
+                # ⭐ 이중 안전장치: 깃허브 IP가 일시 차단되어 네이버에서 못 가져왔을 경우 한투 API로 백업 호출
+                if lblt_rate is None or rsrv_rate is None:
+                    data_fin = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/finance/financial-ratio", {**headers, "tr_id": "FHKST1060000C"}, params)
+                    if data_fin.get('rt_cd') == '0':
+                        out_fin = data_fin.get('output', {})
+                        if lblt_rate is None and out_fin.get('lblt_rate'):
+                            try: lblt_rate = float(out_fin.get('lblt_rate'))
+                            except: pass
+                        if rsrv_rate is None and out_fin.get('rsrv_rate'):
+                            try: rsrv_rate = float(out_fin.get('rsrv_rate'))
+                            except: pass
                 time.sleep(0.1)
                 
-            # 4. 데이터 병합
+            # 4. 행 병합
             market_data.append({
                 "날짜": today_str,
                 "종목코드": code, 
@@ -203,7 +213,6 @@ def fetch_market_data():
 def save_to_hybrid_storage(new_df):
     today_str = datetime.now().strftime("%Y-%m-%d")
     csv_filename = "market_data_archive.csv"
-    
     sheet_df = new_df.fillna("") 
     
     if os.path.exists(csv_filename):
@@ -260,5 +269,4 @@ if __name__ == "__main__":
         send_telegram_message(f"✅ [프로 버전 수집 완료]\n날짜: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n종목 수: {len(daily_df):,}개")
     except Exception as e:
         send_telegram_message(f"🚨 [수집 에러]\n{str(e)}")
-        # ⭐ 핵심 수정: 에러 발생 시 깃허브 액션이 멈추도록 강제 에러 발생
         raise e
