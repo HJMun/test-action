@@ -207,7 +207,16 @@ def save_to_hybrid_storage(new_df):
     else:
         new_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
     try:
-        credentials = Credentials.from_service_account_info(eval(GCP_JSON), scopes=SCOPES)
+        # ⭐ 핵심 수정: eval() 대신 안전한 json.loads() 사용 및 private_key 줄바꿈 강제 복구
+        try:
+            gcp_info = json.loads(GCP_JSON, strict=False)
+        except Exception:
+            gcp_info = eval(GCP_JSON)
+            
+        if "private_key" in gcp_info:
+            gcp_info["private_key"] = gcp_info["private_key"].replace("\\n", "\n")
+            
+        credentials = Credentials.from_service_account_info(gcp_info, scopes=SCOPES)
         drive_service = build('drive', 'v3', credentials=credentials)
         query_csv = f"name='{csv_filename}' and '{GDRIVE_FOLDER_ID}' in parents and trashed=false"
         csv_results = drive_service.files().list(q=query_csv, spaces='drive').execute()
