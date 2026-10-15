@@ -74,46 +74,65 @@ def safe_kis_request(url, headers, params):
             time.sleep(1.0)
     return {}
 
-def get_fnguide_finance(code):
-    url = f"https://comp.fnguide.com/SVO2/ASP/SVD_Main.asp?pGB=1&gicode=A{code}"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+# ⭐ 핵심 1: 봇 차단을 뚫기 위한 강력한 위장 헤더 및 이중화 파서
+def get_finance_data(code):
     lblt_rate, rsrv_rate, div_yield = None, None, None 
-    try:
-        res = requests.get(url, headers=headers, timeout=5)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        table = soup.find('div', id='highlight_D_Y')
-        if not table:
-            return None, None, None
-        def extract_from_row(keyword):
-            th = table.find(lambda tag: tag.name in ['th', 'dt'] and keyword in tag.get_text())
-            if th:
+    web_headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Referer': 'https://finance.naver.com/',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
+    }
+    
+    def extract_from_soup(soup, keywords):
+        for th in soup.find_all(['th', 'dt']):
+            text = th.get_text().strip()
+            if any(k in text for k in keywords):
                 tr = th.parent
                 tds = tr.find_all('td')
                 vals = [re.sub(r'[^0-9.-]', '', td.get_text()) for td in tds]
                 vals = [float(v) for v in vals if v not in ['', '-']]
-                if vals:
-                    return vals[-1]
-            return None
-        lblt_rate = extract_from_row('부채비율')
-        rsrv_rate = extract_from_row('유보율')
-        div_yield = extract_from_row('배당수익률')
+                if vals: return vals[-1]
+        return None
+
+    try:
+        res = requests.get(f"https://finance.naver.com/item/main.naver?code={code}", headers=web_headers, timeout=5)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        lblt_rate = extract_from_soup(soup, ['부채비율'])
+        rsrv_rate = extract_from_soup(soup, ['유보율'])
+        div_yield = extract_from_soup(soup, ['시가배당률', '배당수익률'])
+        if lblt_rate and rsrv_rate:
+            return lblt_rate, rsrv_rate, div_yield
     except Exception:
         pass
+        
+    try:
+        web_headers['Referer'] = 'https://comp.fnguide.com/'
+        res = requests.get(f"https://comp.fnguide.com/SVO2/ASP/SVD_Main.asp?pGB=1&gicode=A{code}", headers=web_headers, timeout=5)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        lblt_rate = lblt_rate or extract_from_soup(soup, ['부채비율'])
+        rsrv_rate = rsrv_rate or extract_from_soup(soup, ['유보율'])
+        div_yield = div_yield or extract_from_soup(soup, ['배당수익률'])
+    except Exception:
+        pass
+        
     return lblt_rate, rsrv_rate, div_yield
 
 def fetch_market_data():
     today_str = datetime.now().strftime("%Y-%m-%d")
-    print(f"[{today_str}] 프로 버전 데이터 수집 시작 (FnGuide 결측치 방어 모드)...")
+    print(f"[{today_str}] 프로 버전 데이터 수집 시작 (수급 및 결측치 방어 모드)...")
     access_token = get_kis_access_token()
     symbols_list = get_all_target_symbols()
     market_data = []
-    headers = {"content-type": "application/json", "authorization": f"Bearer {access_token}", "appkey": APP_KEY, "appsecret": APP_SECRET}
+    api_headers = {"content-type": "application/json", "authorization": f"Bearer {access_token}", "appkey": APP_KEY, "appsecret": APP_SECRET}
+    
     for item in symbols_list:
         code = item['종목코드']
         is_etf = item['업종'] == 'ETF'
         params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
+        
         try:
-            data_price = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price", {**headers, "tr_id": "FHKST01010100"}, params)
+            data_price = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price", {**api_headers, "tr_id": "FHKST01010100"}, params)
             time.sleep(0.06) 
             output_price = data_price.get('output', {}) if data_price.get('rt_cd') == '0' else {}
             close_price = int(output_price.get('stck_prpr', 0))
@@ -126,8 +145,11 @@ def fetch_market_data():
             trade_value_100m = round((volume * close_price) / 100000000, 2) 
             per = float(output_price.get('per')) if output_price.get('per') else None
             pbr = float(output_price.get('pbr')) if output_price.get('pbr') else None
-            data_inv = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor", {**headers, "tr_id": "FHKST01010900"}, params)
+            
+            data_inv = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor", {**api_headers, "tr_id": "FHKST01010900"}, params)
             time.sleep(0.06)
+            
+            # ⭐ 핵심 2: KIS API 공식 문서 기반 정확한 기관 매수 수량 키 매핑
             frgn_qty, orgn_qty, pnsn_qty, pe_qty, fncg_qty = 0, 0, 0, 0, 0
             if data_inv.get('rt_cd') == '0':
                 out_inv = data_inv.get('output', [])
@@ -137,16 +159,20 @@ def fetch_market_data():
                         return int(ti.get(k, 0)) if ti.get(k) else 0
                     frgn_qty = g('frgn_ntby_qty')
                     orgn_qty = g('orgn_ntby_qty')
-                    pnsn_qty = g('prps_ntby_qty')
-                    pe_qty   = g('pe_fund_ntby_qty')
-                    fncg_qty = g('fncg_cmn_ntby_qty')
+                    pnsn_qty = g('pns_ntby_qty') # 연기금
+                    pe_qty   = g('prf_ntby_qty') # 사모펀드
+                    fncg_qty = g('sec_ntby_qty') # 금융투자(증권)
+                    
             roe_val, lblt_rate, rsrv_rate, div_yield = None, None, None, None
             if not is_etf and close_price > 0:
                 if per is not None and pbr is not None and per != 0:
                     roe_val = round((pbr / per) * 100, 2)
-                lblt_rate, rsrv_rate, div_yield = get_fnguide_finance(code)
+                    
+                lblt_rate, rsrv_rate, div_yield = get_finance_data(code)
+                
+                # 최후의 보루: 한투 API 기본 재무비율 호출
                 if lblt_rate is None or rsrv_rate is None:
-                    data_fin = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/finance/financial-ratio", {**headers, "tr_id": "FHKST1060000C"}, params)
+                    data_fin = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/finance/financial-ratio", {**api_headers, "tr_id": "FHKST1060000C"}, params)
                     if data_fin.get('rt_cd') == '0':
                         out_fin = data_fin.get('output', {})
                         if lblt_rate is None and out_fin.get('lblt_rate'):
@@ -160,6 +186,7 @@ def fetch_market_data():
                             except Exception: 
                                 pass
                 time.sleep(0.1)
+                
             market_data.append({
                 "날짜": today_str,
                 "종목코드": code, 
@@ -189,12 +216,14 @@ def fetch_market_data():
         except Exception as e:
             print(f"{code} 수집 에러: {e}")
             continue
+            
     return pd.DataFrame(market_data)
 
 def save_to_hybrid_storage(new_df):
     today_str = datetime.now().strftime("%Y-%m-%d")
     csv_filename = "market_data_archive.csv"
     sheet_df = new_df.fillna("") 
+    
     if os.path.exists(csv_filename):
         try:
             archive_df = pd.read_csv(csv_filename, dtype={'종목코드': str})
@@ -206,8 +235,8 @@ def save_to_hybrid_storage(new_df):
             new_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
     else:
         new_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
+        
     try:
-        # ⭐ 핵심 수정: eval() 대신 안전한 json.loads() 사용 및 private_key 줄바꿈 강제 복구
         try:
             gcp_info = json.loads(GCP_JSON, strict=False)
         except Exception:
@@ -222,14 +251,17 @@ def save_to_hybrid_storage(new_df):
         csv_results = drive_service.files().list(q=query_csv, spaces='drive').execute()
         csv_items = csv_results.get('files', [])
         media = MediaFileUpload(csv_filename, mimetype='text/csv', resumable=True)
+        
         if not csv_items:
             drive_service.files().create(body={'name': csv_filename, 'parents': [GDRIVE_FOLDER_ID]}, media_body=media, fields='id').execute()
         else:
             drive_service.files().update(fileId=csv_items[0].get('id'), media_body=media).execute()
+            
         gc = gspread.authorize(credentials)
         sheet = gc.open_by_url(GSHEET_URL).worksheet("RawData")
         existing_data = sheet.get_all_records()
         existing_df = pd.DataFrame(existing_data)
+        
         if not existing_df.empty:
             existing_df['날짜'] = pd.to_datetime(existing_df['날짜'])
             cutoff_date = pd.to_datetime(today_str) - timedelta(days=30)
@@ -240,6 +272,7 @@ def save_to_hybrid_storage(new_df):
             final_df.drop_duplicates(subset=['날짜', '종목코드'], keep='last', inplace=True)
         else:
             final_df = sheet_df
+            
         sheet.clear()
         sheet.update([final_df.columns.values.tolist()] + final_df.values.tolist())
     except Exception as e:
