@@ -1,10 +1,8 @@
 import os
 import time
 import json
-import re
 import requests
 import pandas as pd
-from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
@@ -53,11 +51,13 @@ def get_all_target_symbols():
     krx_df = krx_df[['Code', 'Name', 'Market', 'Sector']].rename(columns={'Code': '종목코드', 'Name': '종목명', 'Market': '시장구분', 'Sector': '업종'})
     krx_df['업종'] = krx_df['업종'].fillna('기타')
     krx_df['종목코드'] = krx_df['종목코드'].astype(str).str.zfill(6)
+    
     etf_df = fdr.StockListing('ETF/KR')
     etf_df = etf_df[['Symbol', 'Name']].rename(columns={'Symbol': '종목코드', 'Name': '종목명'})
     etf_df['시장구분'] = 'ETF'
     etf_df['업종'] = 'ETF'
     etf_df['종목코드'] = etf_df['종목코드'].astype(str).str.zfill(6)
+    
     final_df = pd.concat([krx_df, etf_df], ignore_index=True).drop_duplicates(subset=['종목코드'])
     return final_df.to_dict('records')
 
@@ -74,57 +74,13 @@ def safe_kis_request(url, headers, params):
             time.sleep(1.0)
     return {}
 
-# ⭐ 핵심 1: 봇 차단을 뚫기 위한 강력한 위장 헤더 및 이중화 파서
-def get_finance_data(code):
-    lblt_rate, rsrv_rate, div_yield = None, None, None 
-    web_headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Referer': 'https://finance.naver.com/',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
-    }
-    
-    def extract_from_soup(soup, keywords):
-        for th in soup.find_all(['th', 'dt']):
-            text = th.get_text().strip()
-            if any(k in text for k in keywords):
-                tr = th.parent
-                tds = tr.find_all('td')
-                vals = [re.sub(r'[^0-9.-]', '', td.get_text()) for td in tds]
-                vals = [float(v) for v in vals if v not in ['', '-']]
-                if vals: return vals[-1]
-        return None
-
-    try:
-        res = requests.get(f"https://finance.naver.com/item/main.naver?code={code}", headers=web_headers, timeout=5)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        lblt_rate = extract_from_soup(soup, ['부채비율'])
-        rsrv_rate = extract_from_soup(soup, ['유보율'])
-        div_yield = extract_from_soup(soup, ['시가배당률', '배당수익률'])
-        if lblt_rate and rsrv_rate:
-            return lblt_rate, rsrv_rate, div_yield
-    except Exception:
-        pass
-        
-    try:
-        web_headers['Referer'] = 'https://comp.fnguide.com/'
-        res = requests.get(f"https://comp.fnguide.com/SVO2/ASP/SVD_Main.asp?pGB=1&gicode=A{code}", headers=web_headers, timeout=5)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        lblt_rate = lblt_rate or extract_from_soup(soup, ['부채비율'])
-        rsrv_rate = rsrv_rate or extract_from_soup(soup, ['유보율'])
-        div_yield = div_yield or extract_from_soup(soup, ['배당수익률'])
-    except Exception:
-        pass
-        
-    return lblt_rate, rsrv_rate, div_yield
-
 def fetch_market_data():
     today_str = datetime.now().strftime("%Y-%m-%d")
-    print(f"[{today_str}] 프로 버전 데이터 수집 시작 (수급 및 결측치 방어 모드)...")
+    print(f"[{today_str}] 프로 버전 수집 시작 (100% 한투 API 의존 모드)...")
     access_token = get_kis_access_token()
     symbols_list = get_all_target_symbols()
     market_data = []
-    api_headers = {"content-type": "application/json", "authorization": f"Bearer {access_token}", "appkey": APP_KEY, "appsecret": APP_SECRET}
+    headers = {"content-type": "application/json", "authorization": f"Bearer {access_token}", "appkey": APP_KEY, "appsecret": APP_SECRET}
     
     for item in symbols_list:
         code = item['종목코드']
@@ -132,7 +88,7 @@ def fetch_market_data():
         params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
         
         try:
-            data_price = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price", {**api_headers, "tr_id": "FHKST01010100"}, params)
+            data_price = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price", {**headers, "tr_id": "FHKST01010100"}, params)
             time.sleep(0.06) 
             output_price = data_price.get('output', {}) if data_price.get('rt_cd') == '0' else {}
             close_price = int(output_price.get('stck_prpr', 0))
@@ -146,46 +102,38 @@ def fetch_market_data():
             per = float(output_price.get('per')) if output_price.get('per') else None
             pbr = float(output_price.get('pbr')) if output_price.get('pbr') else None
             
-            data_inv = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor", {**api_headers, "tr_id": "FHKST01010900"}, params)
+            data_inv = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor", {**headers, "tr_id": "FHKST01010900"}, params)
             time.sleep(0.06)
             
-            # ⭐ 핵심 2: KIS API 공식 문서 기반 정확한 기관 매수 수량 키 매핑
+            # ⭐ 수정 1: KIS API 공식 수급 변수명으로 완벽 복구
             frgn_qty, orgn_qty, pnsn_qty, pe_qty, fncg_qty = 0, 0, 0, 0, 0
             if data_inv.get('rt_cd') == '0':
                 out_inv = data_inv.get('output', [])
                 if len(out_inv) > 0:
                     ti = out_inv[0]
-                    def g(k): 
-                        return int(ti.get(k, 0)) if ti.get(k) else 0
+                    def g(k): return int(ti.get(k, 0)) if ti.get(k) else 0
                     frgn_qty = g('frgn_ntby_qty')
                     orgn_qty = g('orgn_ntby_qty')
-                    pnsn_qty = g('pns_ntby_qty') # 연기금
-                    pe_qty   = g('prf_ntby_qty') # 사모펀드
-                    fncg_qty = g('sec_ntby_qty') # 금융투자(증권)
-                    
-            roe_val, lblt_rate, rsrv_rate, div_yield = None, None, None, None
+                    pnsn_qty = g('prps_ntby_qty')     # 연기금
+                    pe_qty   = g('pe_fund_ntby_qty')  # 사모펀드
+                    fncg_qty = g('fncg_cmn_ntby_qty') # 금융투자
+
+            # ⭐ 수정 2: 크롤링 차단 회피를 위해 한투 재무 API 전면 도입
+            roe_val, lblt_rate, rsrv_rate, div_yield = None, None, None, 0.0
             if not is_etf and close_price > 0:
                 if per is not None and pbr is not None and per != 0:
                     roe_val = round((pbr / per) * 100, 2)
                     
-                lblt_rate, rsrv_rate, div_yield = get_finance_data(code)
-                
-                # 최후의 보루: 한투 API 기본 재무비율 호출
-                if lblt_rate is None or rsrv_rate is None:
-                    data_fin = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/finance/financial-ratio", {**api_headers, "tr_id": "FHKST1060000C"}, params)
-                    if data_fin.get('rt_cd') == '0':
-                        out_fin = data_fin.get('output', {})
-                        if lblt_rate is None and out_fin.get('lblt_rate'):
-                            try: 
-                                lblt_rate = float(out_fin.get('lblt_rate'))
-                            except Exception: 
-                                pass
-                        if rsrv_rate is None and out_fin.get('rsrv_rate'):
-                            try: 
-                                rsrv_rate = float(out_fin.get('rsrv_rate'))
-                            except Exception: 
-                                pass
-                time.sleep(0.1)
+                data_fin = safe_kis_request(f"{KIS_BASE_URL}/uapi/domestic-stock/v1/finance/financial-ratio", {**headers, "tr_id": "FHKST1060000C"}, params)
+                if data_fin.get('rt_cd') == '0':
+                    out_fin = data_fin.get('output', {})
+                    if out_fin.get('lblt_rate'):
+                        try: lblt_rate = float(out_fin.get('lblt_rate'))
+                        except Exception: pass
+                    if out_fin.get('rsrv_rate'):
+                        try: rsrv_rate = float(out_fin.get('rsrv_rate'))
+                        except Exception: pass
+                time.sleep(0.06)
                 
             market_data.append({
                 "날짜": today_str,
@@ -216,7 +164,7 @@ def fetch_market_data():
         except Exception as e:
             print(f"{code} 수집 에러: {e}")
             continue
-            
+
     return pd.DataFrame(market_data)
 
 def save_to_hybrid_storage(new_df):
