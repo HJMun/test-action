@@ -1,0 +1,32 @@
+name: Manual_PerterLynch
+
+# workflow_dispatch는 "버튼을 눌렀을 때만 작동해라"라는 수동 스위치 명령어입니다.
+on:
+  workflow_dispatch: 
+
+jobs:
+  extract-lynch:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas requests gspread google-auth
+
+      - name: Run Peter Lynch Screener
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GSHEET_URL: ${{ secrets.GSHEET_URL }}
+          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
+        # ⭐ 수정한 부분: 실행할 파이썬 파일 이름을 새 이름으로 변경했습니다.
+        run: |
+          python Manual_PerterLynch.py
